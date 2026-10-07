@@ -1,0 +1,19 @@
+# Python bytecode and cache directories
+__pycache__/
+*.py[cod]
+*$py.class
+
+.venv/
+DNA_*/
+art-res/host-tools.local.json
+art-res/ui-settings.json
+art-res/.wsl-ready-*
+art-res/bin-win-amd64/
+*.zip
+*.exe
+build-call.log
+.art-build/
+.art-dist/
+.art-release/
+__pycache__/
+

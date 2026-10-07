@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Build an A.R.T release without touching user project directories."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import sys
+import zipfile
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent
+BUILD_DIR = ROOT / '.art-build'
+DIST_DIR = ROOT / '.art-dist'
+RELEASE_DIR = ROOT / '.art-release'
+_ARCHIVE_PATTERN = re.compile(r'^\d+\.\d+\.\d+$')
+
+
+def _log(step: str, msg: str) -> None:
+    print(f'  [{step}] {msg}')
+
+
+def remove_generated_path(path: Path) -> None:
+    """Remove only a build artifact path owned by this script."""
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def copy_release_resources(release_dir: Path) -> None:
+    resource_source = ROOT / 'art-res'
+    resource_target = release_dir / 'art-res'
+    if resource_source.is_dir():
+        shutil.copytree(resource_source, resource_target, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns('ui-settings.json', 'host-tools.local.json', '.wsl-ready-*'))
+    icon_source = ROOT / 'assets' / 'android-rom-toolkit.ico'
+    if icon_source.is_file():
+        shutil.copy2(icon_source, resource_target / icon_source.name)
+
+    for filename in ('setting.ini', 'LICENSE', 'README.md', 'ATTRIBUTIONS.md'):
+        source = ROOT / filename
+        if source.is_file():
+            shutil.copy2(source, release_dir / filename)
+
+
+def zip_release(release_dir: Path, archive_path: Path) -> int:
+    if archive_path.exists():
+        archive_path.unlink()
+    count = 0
+    with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for source in sorted(release_dir.rglob('*')):
+            if source.is_file():
+                archive.write(source, source.relative_to(release_dir))
+                count += 1
+    return count
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='A.R.T Release Builder')
+    parser.add_argument('--version', type=str, help='Release version (e.g. 1.3.0)')
+    args = parser.parse_args()
+    if args.version and not _ARCHIVE_PATTERN.match(args.version):
+        parser.error(f'Invalid version format: {args.version!r} (expected X.Y.Z)')
+    return args
+
+
+def main() -> None:
+    args = parse_args()
+    archive_name = f'A.R.T-Windows-amd64-v{args.version}.zip' if args.version else 'A.R.T-Windows-amd64.zip'
+    ARCHIVE = ROOT / archive_name
+
+    print(f'\n{"=" * 40}\n{" " * 11}A.R.T Builder{" " * 15}\n{"=" * 40}')
+    if args.version:
+        print(f'> Version: {args.version}')
+
+    # Step 1: Clean
+    _log('1/4', 'Cleaning build artifacts...')
+    for path in (BUILD_DIR, DIST_DIR, RELEASE_DIR):
+        remove_generated_path(path)
+
+    # Step 2: PyInstaller (verbose output goes to build-call.log)
+    _log('2/4', 'Compiling with PyInstaller...')
+    import subprocess
+
+    log_file = ROOT / 'build-call.log'
+    result = subprocess.run(
+        [sys.executable, '-m', 'PyInstaller',
+         str(ROOT / 'Scripts' / 'main.py'),
+         '--onefile',
+         *(['--windowed'] if os.name == 'nt' else []),
+         '--name', 'art',
+         '--icon', str(ROOT / 'assets' / 'android-rom-toolkit.ico'),
+         '--distpath', str(DIST_DIR),
+         '--workpath', str(BUILD_DIR),
+         '--specpath', str(BUILD_DIR),
+         '--exclude-module', 'numpy',
+         '--hidden-import', 'Scripts.mcp_server',
+         '--hidden-import', 'mcp.server.fastmcp'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    log_file.write_text(result.stdout or '', encoding='utf-8')
+
+    built_executable = DIST_DIR / ('art.exe' if os.name == 'nt' else 'art')
+    if result.returncode != 0 or not built_executable.is_file():
+        print(f'\n  [ERROR] PyInstaller failed. See {log_file.name} for details.', file=sys.stderr)
+        if result.stdout:
+            for line in result.stdout.splitlines():
+                if 'ERROR' in line or 'CRITICAL' in line:
+                    print(f'  {line}', file=sys.stderr)
+        sys.exit(1)
+
+    # Step 3: Assemble release
+    _log('3/4', 'Assembling release directory...')
+    release_dir = RELEASE_DIR
+    release_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(built_executable, release_dir / built_executable.name)
+    if os.name != 'nt':
+        os.chmod(release_dir / built_executable.name, 0o755)
+    copy_release_resources(release_dir)
+
+    # Step 4: Archive
+    _log('4/4', f'Packing {ARCHIVE.name}...')
+    count = zip_release(release_dir, ARCHIVE)
+    size_mb = ARCHIVE.stat().st_size / (1024 * 1024)
+    _log('END', f'Build Completed:{count} files {size_mb:.1f} MB')
+
+    # Cleanup
+    for path in (BUILD_DIR, DIST_DIR, RELEASE_DIR):
+        remove_generated_path(path)
+
+    print(f'{"=" * 40}\n ')
+
+if __name__ == '__main__':
+    main()

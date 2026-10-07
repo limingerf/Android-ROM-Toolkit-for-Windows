@@ -1,0 +1,10 @@
+# Build
+pyinstaller
+
+# Runtime
+requests
+rich
+protobuf
+zstandard
+ttkbootstrap>=1.10.1
+mcp>=1.12,<2
