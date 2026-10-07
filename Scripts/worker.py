@@ -77,7 +77,10 @@ def _publish(pairs, *, replace=False):
                           if destination.name == "config" or destination.parent.name == "config"), None)
         if workspace is None:
             workspace = pairs[0][1].parent
-        backup_dir = Path(tempfile.mkdtemp(prefix=".art-backup-", dir=workspace))
+        # Keep the transaction directory outside config/WORKSPACE.  Putting
+        # it inside config makes a failed publish look like one of the files
+        # being committed and can make rollback fail with FileNotFoundError.
+        backup_dir = Path(tempfile.mkdtemp(prefix=".art-backup-", dir=workspace.parent))
         for index, (_source, destination) in enumerate(pairs):
             if destination.exists() or destination.is_symlink():
                 backup = backup_dir / str(index)
@@ -94,7 +97,8 @@ def _publish(pairs, *, replace=False):
             if destination.exists() or destination.is_symlink():
                 os.replace(destination, source)
         for backup, destination in reversed(backups):
-            os.replace(backup, destination)
+            if backup.exists() or backup.is_symlink():
+                os.replace(backup, destination)
         if backup_dir:
             shutil.rmtree(backup_dir, ignore_errors=True)
         raise
