@@ -124,14 +124,34 @@ class ArtApp(Window):
         self._deferred_logs = []
         self._resize_after = None
         self._resizing = False
-        self._resize_shield = None
         self.pages = {}
         self.nav = {}
         self.current_page = "workspace"
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Configure>", self._on_configure)
         self._build_ui()
+        self._enable_windows_compositing()
         self.after(80, self._poll)
+
+    def _enable_windows_compositing(self):
+        """Let Windows compose child controls into one buffered resize frame."""
+        if os.name != "nt":
+            return
+        try:
+            hwnd = self.winfo_id()
+            user32 = ctypes.windll.user32
+            get_long = user32.GetWindowLongPtrW
+            set_long = user32.SetWindowLongPtrW
+            get_long.restype = ctypes.c_ssize_t
+            set_long.restype = ctypes.c_ssize_t
+            exstyle = get_long(hwnd, -20)
+            set_long(hwnd, -20, exstyle | 0x02000000)  # WS_EX_COMPOSITED
+            # Clip children while the frame is resized so exposed parent
+            # pixels never erase over a child widget.
+            style = get_long(hwnd, -16)
+            set_long(hwnd, -16, style | 0x02000000)  # WS_CLIPCHILDREN
+        except (AttributeError, OSError, tk.TclError):
+            pass
 
     def _settings_path(self):
         path = self.controller.root / "art-res" / "ui-settings.json"
@@ -843,17 +863,6 @@ class ArtApp(Window):
         if event.widget is not self:
             return
         self._resizing = True
-        if self._resize_shield is None:
-            self._resize_shield = tk.Frame(self, bg=PALETTE["bg"], cursor="size_nw_se")
-            self._resize_shield.place(relx=0, rely=0, relwidth=1, relheight=1)
-            self._resize_shield.lift()
-        # Paint the native window before Tk redraws the themed children. This
-        # prevents the exposed area from briefly using the Windows black erase
-        # background while dragging the frame.
-        try:
-            self.configure(background=PALETTE["bg"])
-        except tk.TclError:
-            pass
         if self.process is not None:
             self.progress.stop()
         if self._resize_after is not None:
@@ -863,9 +872,6 @@ class ArtApp(Window):
     def _finish_resize(self):
         self._resize_after = None
         self._resizing = False
-        if self._resize_shield is not None:
-            self._resize_shield.destroy()
-            self._resize_shield = None
         if self._deferred_logs:
             self._log_many(self._deferred_logs[:])
             self._deferred_logs.clear()
