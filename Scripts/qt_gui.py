@@ -16,8 +16,8 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon, QFont
+from PySide6.QtCore import QObject, Qt, QTimer, Signal, QEvent, QPoint
+from PySide6.QtGui import QAction, QIcon, QFont, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
@@ -50,23 +50,125 @@ class EventBridge(QObject):
     event = Signal(dict)
 
 
+class TitleBar(QFrame):
+    """Compact title bar drawn by Qt instead of the Windows frame.
+
+    The application still uses a regular top-level window and the parent
+    installs an application event filter for edge resizing.  Keeping the title
+    bar as a normal widget means it is rendered by the same backing store as
+    the rest of the page, so there is no second native frame to flash while
+    the window is resized.
+    """
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+        self.setObjectName("titlebar")
+        self.setFixedHeight(48)
+        self._drag_offset = None
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 0, 8, 0)
+        layout.setSpacing(10)
+        icon = QLabel()
+        icon.setObjectName("titleIcon")
+        icon.setFixedSize(24, 24)
+        icon_path = window._icon_path()
+        if icon_path:
+            pixmap = QPixmap(str(icon_path)).scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            icon.setPixmap(pixmap)
+        layout.addWidget(icon)
+        title = QLabel("Android ROM Toolkit")
+        title.setObjectName("windowTitle")
+        layout.addWidget(title)
+        subtitle = QLabel("Windows 工作台")
+        subtitle.setObjectName("windowSubtitle")
+        layout.addWidget(subtitle)
+        layout.addStretch(1)
+        self.minimize = self._button("—", "最小化", "windowMin")
+        self.maximize = self._button("□", "最大化", "windowMax")
+        self.close_button = self._button("×", "关闭", "windowClose")
+        self.minimize.clicked.connect(window.showMinimized)
+        self.maximize.clicked.connect(window._toggle_maximize)
+        self.close_button.clicked.connect(window.close)
+        layout.addWidget(self.minimize)
+        layout.addWidget(self.maximize)
+        layout.addWidget(self.close_button)
+
+    @staticmethod
+    def _button(text, tip, object_name):
+        button = QPushButton(text)
+        button.setObjectName(object_name)
+        button.setToolTip(tip)
+        button.setFixedSize(38, 32)
+        button.setFlat(True)
+        return button
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.window._toggle_maximize()
+        super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.globalPosition().toPoint() - self.window.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            # Restore a maximized window when the user starts dragging its
+            # title bar, preserving the pointer's horizontal position.
+            if self.window.isMaximized():
+                pointer = event.globalPosition().toPoint()
+                self.window.showNormal()
+                self._drag_offset = QPoint(self.window.width() // 2, 20)
+                self.window.move(pointer - self._drag_offset)
+            else:
+                self.window.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+
 class ArtWindow(QMainWindow):
     def __init__(self, controller: ArtController):
         super().__init__()
+        # A Qt-drawn frame avoids the native title bar's second composition
+        # surface.  The edge resize handler below keeps normal desktop window
+        # behavior without relying on platform-specific non-client painting.
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.controller = controller
         self.events: queue.Queue = queue.Queue()
         self.process = None
+        # Synchronous controller helpers (import/archive/tool bootstrap) run
+        # in a Python thread rather than the worker subprocess.  Keep a
+        # separate guard so a second job cannot start while one of these is
+        # still publishing files.
+        self._thread_busy = False
         self.cancelled = False
         self.projects = []
         self.inputs = {}
         self.partitions = {}
         self.current_page = 0
         self._log_lines = 0
+        self._action_buttons = []
         self.ui_theme = self._load_theme()
         self.setWindowTitle("Android ROM Toolkit for Windows")
         self.setMinimumSize(1040, 700)
         self.resize(1240, 800)
         self._set_icon()
+        self._resize_margin = 7
+        self._resize_mode = None
+        self._resize_start_pos = None
+        self._resize_start_geometry = None
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         self._apply_style()
         self._build_ui()
         self.refresh()
@@ -75,55 +177,172 @@ class ArtWindow(QMainWindow):
         self.timer.start(80)
 
     def _set_icon(self):
+        for path in (self._icon_path(),):
+            if path.is_file():
+                self.setWindowIcon(QIcon(str(path)))
+                QApplication.instance().setWindowIcon(QIcon(str(path)))
+                return
+
+    @staticmethod
+    def _icon_path():
         root = Path(getattr(sys, "_MEIPASS", ROOT))
         for path in (root / "assets" / "android-rom-toolkit.ico",
                      ROOT / "assets" / "android-rom-toolkit.ico",
                      ROOT / "art-res" / "android-rom-toolkit.ico"):
             if path.is_file():
-                self.setWindowIcon(QIcon(str(path)))
-                QApplication.instance().setWindowIcon(QIcon(str(path)))
-                return
+                return path
+        return root / "assets" / "android-rom-toolkit.ico"
+
+    def _toggle_maximize(self):
+        if self.isMaximized():
+            self.showNormal()
+            self.titlebar.maximize.setText("□")
+            self.titlebar.maximize.setToolTip("最大化")
+        else:
+            self.showMaximized()
+            self.titlebar.maximize.setText("❐")
+            self.titlebar.maximize.setToolTip("还原")
+
+    def eventFilter(self, watched, event):
+        """Provide native-like edge resizing for the frameless window.
+
+        The filter is installed on QApplication so it also receives mouse
+        events delivered to child widgets.  Geometry is changed directly from
+        the original rectangle and pointer delta, avoiding a layout rebuild on
+        every move and keeping resize repainting smooth.
+        """
+        # QApplication sees events for file dialogs and other top-level
+        # windows as well.  Only handle events belonging to this window's
+        # widget tree; otherwise opening a native dialog could accidentally
+        # begin a resize because its screen coordinates map outside our frame.
+        in_window = watched is self or (isinstance(watched, QWidget) and self.isAncestorOf(watched))
+        if in_window and event.type() in (QEvent.Type.MouseButtonPress,
+                                          QEvent.Type.MouseMove,
+                                          QEvent.Type.MouseButtonRelease):
+            if self.isMaximized() or not self.isVisible():
+                return super().eventFilter(watched, event)
+            point = event.globalPosition().toPoint()
+            local = self.mapFromGlobal(point)
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                mode = self._resize_hit_test(local)
+                if mode:
+                    self._resize_mode = mode
+                    self._resize_start_pos = point
+                    self._resize_start_geometry = self.geometry()
+                    return True
+            elif event.type() == QEvent.Type.MouseMove and self._resize_mode:
+                if event.buttons() & Qt.MouseButton.LeftButton:
+                    self._resize_by_delta(point)
+                    return True
+                self._resize_mode = None
+            elif event.type() == QEvent.Type.MouseButtonRelease and self._resize_mode:
+                self._resize_by_delta(point)
+                self._resize_mode = None
+                return True
+        return super().eventFilter(watched, event)
+
+    def _resize_hit_test(self, point):
+        margin = self._resize_margin
+        x, y, width, height = point.x(), point.y(), self.width(), self.height()
+        left, right = x <= margin, x >= width - margin
+        top, bottom = y <= margin, y >= height - margin
+        if top and left: return "tl"
+        if top and right: return "tr"
+        if bottom and left: return "bl"
+        if bottom and right: return "br"
+        if left: return "l"
+        if right: return "r"
+        if top: return "t"
+        if bottom: return "b"
+        return None
+
+    def _resize_by_delta(self, point):
+        if self._resize_start_geometry is None or self._resize_start_pos is None:
+            return
+        delta = point - self._resize_start_pos
+        geometry = self._resize_start_geometry
+        left, top, width, height = geometry.x(), geometry.y(), geometry.width(), geometry.height()
+        min_width, min_height = self.minimumWidth(), self.minimumHeight()
+        mode = self._resize_mode or ""
+        if "l" in mode:
+            new_left = min(left + delta.x(), left + width - min_width)
+            width += left - new_left; left = new_left
+        if "r" in mode:
+            width = max(min_width, width + delta.x())
+        if "t" in mode:
+            new_top = min(top + delta.y(), top + height - min_height)
+            height += top - new_top; top = new_top
+        if "b" in mode:
+            height = max(min_height, height + delta.y())
+        self.setGeometry(left, top, width, height)
 
     def _apply_style(self):
         # Fusion uses Qt's cross-platform controls and lets DWM composite one
         # backing store instead of hundreds of Tk child windows.
         QApplication.instance().setStyle("Fusion")
         sheet = """
-            QWidget { font-family: 'Microsoft YaHei UI'; font-size: 10pt; color: #1f2937; }
-            QMainWindow, QWidget#root, QStackedWidget { background: #f4f7fb; }
-            QFrame#sidebar { background: #edf2f8; border: 0; }
-            QFrame#card, QGroupBox { background: #ffffff; border: 1px solid #d7e0eb; border-radius: 10px; }
+            * { font-family: 'Microsoft YaHei UI'; font-size: 10pt; }
+            QWidget { color: #142238; }
+            QMainWindow, QWidget#root, QWidget#windowBody, QStackedWidget { background: #eef3fb; }
+            QFrame#titlebar { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #e6edff, stop:0.52 #f6f8ff, stop:1 #e6f8f6); border-bottom: 1px solid #d4e0f2; }
+            QLabel#windowTitle { font-size: 11pt; font-weight: 700; color: #17253c; }
+            QLabel#windowSubtitle { color: #6e7d95; font-size: 9pt; }
+            QLabel#titleIcon { background: transparent; }
+            QPushButton#windowMin, QPushButton#windowMax, QPushButton#windowClose { border: 0; border-radius: 7px; background: transparent; color: #52627a; font-size: 14pt; padding: 0; }
+            QPushButton#windowMin:hover, QPushButton#windowMax:hover { background: rgba(77, 112, 172, 35); color: #1e3a63; }
+            QPushButton#windowClose:hover { background: #df5d78; color: white; }
+            QFrame#sidebar { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #e7edfb, stop:0.48 #e9f4ff, stop:1 #e2f5f2); border-right: 1px solid #d5e0f0; }
+            QFrame#card, QGroupBox { background: rgba(255,255,255,218); border: 1px solid rgba(196,211,232,210); border-radius: 14px; }
             QGroupBox { margin-top: 12px; padding: 18px 12px 12px 12px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 5px; font-weight: 600; }
-            QLabel#muted { color: #65758b; }
-            QLabel#title { font-size: 20pt; font-weight: 700; }
-            QPushButton { border: 1px solid #c7d3e3; border-radius: 6px; padding: 8px 15px; background: #fff; }
-            QPushButton:hover { background: #eaf1ff; border-color: #376fd1; }
-            QPushButton#primary { color: white; background: #376fd1; border-color: #376fd1; }
-            QPushButton#primary:hover { background: #2e5eb4; }
-            QPushButton:disabled { color: #98a5b5; background: #edf2f8; }
+            QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 7px; font-weight: 700; color: #1c3356; background: #eef3fb; }
+            QLabel#muted { color: #6c7d96; }
+            QLabel#title { font-size: 20pt; font-weight: 750; color: #14294a; }
+            QPushButton { border: 1px solid #c4d1e5; border-radius: 8px; padding: 8px 15px; background: rgba(255,255,255,235); color: #1c355b; }
+            QPushButton:hover { background: #e6efff; border-color: #638bd2; }
+            QPushButton#primary { color: white; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3c70d6, stop:1 #517fde); border-color: #3c70d6; font-weight: 650; }
+            QPushButton#primary:hover { background: #315dbb; }
+            QPushButton:disabled { color: #9daabe; background: #e5ebf4; }
             QListWidget#nav { background: transparent; border: 0; outline: 0; }
-            QListWidget#nav::item { padding: 12px 14px; margin: 3px 0; border-radius: 6px; color: #65758b; }
-            QListWidget#nav::item:selected { background: #dce8ff; color: #1f2937; }
-            QLineEdit, QComboBox, QSpinBox { background: #fff; border: 1px solid #c7d3e3; border-radius: 5px; padding: 6px; }
-            QTableWidget { background: #fff; alternate-background-color: #f7f9fc; border: 1px solid #d7e0eb; gridline-color: #e6ebf2; }
-            QHeaderView::section { background: #edf2f8; padding: 8px; border: 0; font-weight: 600; }
-            QPlainTextEdit { background: #f3f6fa; border: 1px solid #d7e0eb; font-family: Consolas; }
-            QProgressBar { border: 0; background: #e7edf5; border-radius: 4px; height: 8px; text-visible: false; }
-            QProgressBar::chunk { background: #376fd1; border-radius: 4px; }
+            QListWidget#nav::item { padding: 12px 14px; margin: 4px 0; border-radius: 9px; color: #60718d; }
+            QListWidget#nav::item:hover { background: rgba(255,255,255,135); color: #274774; }
+            QListWidget#nav::item:selected { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d4e3ff, stop:1 #dff4f3); color: #173c70; font-weight: 700; }
+            QLineEdit, QComboBox, QSpinBox { background: rgba(255,255,255,235); border: 1px solid #c4d1e5; border-radius: 7px; padding: 6px; selection-background-color: #8eb2ee; }
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #638bd2; }
+            QTableWidget { background: rgba(255,255,255,220); alternate-background-color: #f3f7fd; border: 1px solid #cedbeb; border-radius: 9px; gridline-color: #e3eaf3; }
+            QHeaderView::section { background: #e6edf7; padding: 8px; border: 0; font-weight: 650; color: #365174; }
+            QPlainTextEdit { background: #f2f6fb; border: 1px solid #cedbeb; border-radius: 8px; font-family: Consolas; }
+            QProgressBar { border: 0; background: #dfe8f4; border-radius: 5px; height: 9px; text-visible: false; }
+            QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3d73d9, stop:1 #51b6c3); border-radius: 5px; }
+            QTabWidget::pane { border: 1px solid #d2deee; border-radius: 10px; background: rgba(255,255,255,110); top: -1px; }
+            QTabBar::tab { background: transparent; color: #6d7d95; padding: 9px 16px; margin-right: 3px; border-radius: 8px; }
+            QTabBar::tab:hover { background: #e6effe; }
+            QTabBar::tab:selected { background: #d6e5ff; color: #204a85; font-weight: 700; }
+            QCheckBox { spacing: 7px; color: #51647f; }
+            QSplitter::handle { background: #d4dfed; }
         """
         if self.ui_theme == "dark":
             sheet += """
                 QWidget { color: #ecf2fc; }
-                QMainWindow, QWidget#root, QStackedWidget { background: #101521; }
-                QFrame#sidebar, QHeaderView::section { background: #121a29; }
-                QFrame#card, QGroupBox, QTableWidget, QLineEdit, QComboBox, QSpinBox { background: #182031; border-color: #33415a; }
-                QLabel#muted { color: #93a4bc; }
-                QPushButton { background: #182031; color: #ecf2fc; border-color: #33415a; }
-                QPushButton:hover { background: #233653; }
-                QListWidget#nav::item:selected { background: #233653; color: #ecf2fc; }
-                QPlainTextEdit { background: #0e1521; color: #cbd9ef; border-color: #33415a; }
+                QMainWindow, QWidget#root, QWidget#windowBody, QStackedWidget { background: #101721; }
+                QFrame#titlebar { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #192743, stop:0.52 #1d2638, stop:1 #173736); border-color: #2f4463; }
+                QLabel#windowTitle { color: #edf4ff; } QLabel#windowSubtitle { color: #9eafc9; }
+                QPushButton#windowMin, QPushButton#windowMax, QPushButton#windowClose { color: #b9c9e1; }
+                QPushButton#windowMin:hover, QPushButton#windowMax:hover { background: rgba(120, 160, 230, 55); color: #fff; }
+                QFrame#sidebar { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #172239, stop:0.5 #15283a, stop:1 #143331); border-color: #2b3e57; }
+                QFrame#card, QGroupBox, QTableWidget, QLineEdit, QComboBox, QSpinBox { background: rgba(26,37,55,230); border-color: #334962; }
+                QGroupBox::title { background: #101721; color: #d5e3fb; }
+                QLabel#muted { color: #95a8c3; }
+                QLabel#title { color: #edf4ff; }
+                QPushButton { background: #1a2638; color: #ecf2fc; border-color: #3c526f; }
+                QPushButton:hover { background: #263d60; }
+                QListWidget#nav::item:selected { background: #294467; color: #f4f8ff; }
+                QPlainTextEdit { background: #101925; color: #cbd9ef; border-color: #33415a; }
                 QTableWidget { alternate-background-color: #1d293d; gridline-color: #2a3850; }
+                QHeaderView::section { background: #202e44; color: #c8d8ef; }
+                QTabBar::tab:selected { background: #294a72; color: #eff6ff; }
+                QTabWidget::pane { border-color: #324860; background: rgba(20,31,46,140); }
+                QCheckBox { color: #aebed5; }
+                QSplitter::handle { background: #2f4158; }
             """
         QApplication.instance().setStyleSheet(sheet)
 
@@ -153,15 +372,22 @@ class ArtWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget(objectName="root")
         self.setCentralWidget(root)
-        shell = QHBoxLayout(root)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.titlebar = TitleBar(self)
+        outer.addWidget(self.titlebar)
+        body = QWidget(objectName="windowBody")
+        shell = QHBoxLayout(body)
         shell.setContentsMargins(0, 0, 0, 0)
         shell.setSpacing(0)
+        outer.addWidget(body, 1)
         sidebar = QFrame(objectName="sidebar")
         sidebar.setFixedWidth(225)
         side_layout = QVBoxLayout(sidebar)
         side_layout.setContentsMargins(20, 28, 20, 20)
         brand = QLabel("▣  A.R.T")
-        brand.setStyleSheet("font-size: 19pt; font-weight: 700; color: #1f2937;")
+        brand.setStyleSheet("font-size: 19pt; font-weight: 700; color: #234a83;")
         side_layout.addWidget(brand)
         sub = QLabel("ANDROID ROM TOOLKIT")
         sub.setObjectName("muted")
@@ -269,6 +495,36 @@ class ArtWindow(QMainWindow):
         row = QHBoxLayout(); self.backend = QComboBox(); self.backend.addItems(["native", "wsl"]); self.tool_dir = QLineEdit(); row.addWidget(self.backend); row.addWidget(self.tool_dir, 1); row.addWidget(self._button("浏览", self._browse_tools)); row.addWidget(self._button("保存配置", self._save_tools, True)); bl.addLayout(row); self.backend_label = QLabel(objectName="muted"); bl.addWidget(self.backend_label); bl.addWidget(self._button("自动补齐 Windows 工具", self._bootstrap_tools)); layout.addWidget(box)
         box, bl = self._card("功能可用性", "可用状态依据工具文件检测；实际命令执行结果以任务日志为准")
         self.capability_table = self._table(["功能", "状态", "工具"]); bl.addWidget(self.capability_table); layout.addWidget(box, 1); self.pages.addWidget(page)
+        box, bl = self._card("CLI 高级设置", "与原版命令行菜单共用 settings.json")
+        form = QGridLayout(); self.cli_settings = {}
+        setting_defs = (("REPACK_EROFS_IMG", "镜像类型", ("0 · EXT4", "1 · EROFS")),
+                        ("REPACK_SPARSE_IMG", "镜像格式", ("0 · RAW", "1 · Sparse")),
+                        ("REPACK_TO_RW", "EXT4 动态分区", ("0 · RO", "1 · RW")),
+                        ("RESIZE_IMG", "EXT4 压缩空间", ("0 · 否", "1 · 是")),
+                        ("RESIZE_EROFSIMG", "EROFS 压缩算法", ("0 · 无", "1 · LZ4HC", "2 · LZ4")),
+                        ("EROFS_LEVEL", "EROFS 压缩等级", tuple(str(i) for i in range(1, 13))),
+                        ("REPACK_BR_LEVEL", "BROTLI 等级", tuple(str(i) for i in range(10))),
+                        ("UNPACK_SPLIT_DAT", "DAT 分段数", ("5", "10", "15", "20", "30")))
+        values = self.controller.get_settings()
+        for index, (key, title, choices) in enumerate(setting_defs):
+            row, col = divmod(index, 2); form.addWidget(QLabel(title, objectName="muted"), row, col * 2)
+            combo = QComboBox(); combo.addItems(list(choices)); current = str(values.get(key, ""))
+            for choice_index, choice in enumerate(choices):
+                if choice.startswith(current + " ") or choice == current:
+                    combo.setCurrentIndex(choice_index); break
+            combo.setProperty("settingKey", key); self.cli_settings[key] = combo; form.addWidget(combo, row, col * 2 + 1)
+        bl.addLayout(form); bl.addWidget(self._button("保存 CLI 设置", self._save_cli_settings, True)); layout.addWidget(box)
+
+    def _save_cli_settings(self):
+        updates = {}
+        for key, combo in self.cli_settings.items():
+            value = combo.currentText().split(" ", 1)[0]
+            updates[key] = value
+        try:
+            self.controller.update_settings(updates)
+            self.status.setText("CLI 设置已保存")
+        except Exception as error:
+            QMessageBox.critical(self, "保存设置失败", str(error))
 
     def _mcp_page(self):
         page = QWidget(); layout = QVBoxLayout(page); box, bl = self._card("连接你的 AI 客户端", "复制配置到支持 MCP stdio 的客户端")
@@ -277,7 +533,9 @@ class ArtWindow(QMainWindow):
         edit = QPlainTextEdit(self.mcp_config); edit.setReadOnly(True); bl.addWidget(edit); bl.addWidget(self._button("复制连接配置", lambda: self._copy_config(edit), True)); bl.addWidget(QLabel("可调用工具\n工程创建 / 列表 · 输入识别 / 导入\n镜像提取 · 分区回包 · RAW / Sparse 转换\n工具链诊断 · 工作区分区列表", objectName="muted")); layout.addWidget(box, 1); self.pages.addWidget(page)
 
     def _button(self, text, slot, primary=False):
-        b = QPushButton(text); b.setObjectName("primary" if primary else "secondary"); b.clicked.connect(slot); return b
+        b = QPushButton(text); b.setObjectName("primary" if primary else "secondary"); b.clicked.connect(slot)
+        self._action_buttons.append(b)
+        return b
 
     def _show_page(self, index):
         if index < 0: return
@@ -290,6 +548,7 @@ class ArtWindow(QMainWindow):
         self.refresh_inputs()
 
     def refresh(self):
+        previous_project = self.project_combo.currentText()
         try: self.projects = self.controller.list_projects()
         except Exception as e: self.status.setText(str(e)); return
         self.project_table.setRowCount(0)
@@ -298,7 +557,8 @@ class ArtWindow(QMainWindow):
             for col, value in enumerate((item["name"], STATE_NAMES.get(item["state"], item["state"]), item["input_count"], item["output_count"])): self.project_table.setItem(row, col, QTableWidgetItem(str(value)))
         names = [p["name"] for p in self.projects if p["state"] == "new"]
         self.project_combo.blockSignals(True); self.project_combo.clear(); self.project_combo.addItems(names); self.project_combo.blockSignals(False)
-        if names: self.project_combo.setCurrentIndex(0)
+        if names:
+            self.project_combo.setCurrentText(previous_project if previous_project in names else names[0])
         for label, value in zip(self.stat_labels, (len(self.projects), sum(p["input_count"] for p in self.projects), sum(p["output_count"] for p in self.projects))): label.setText(str(value))
         self.refresh_inputs(); self.refresh_runtime()
 
@@ -326,7 +586,12 @@ class ArtWindow(QMainWindow):
         try: status = self.controller.toolchain_status()
         except Exception as e: self.backend_label.setText(str(e)); return
         self.backend.setCurrentText("wsl" if status["mode"] == "wsl" else "native")
-        config = self.controller.root / "art-res" / "host-tools.local.json"; local = json.loads(config.read_text(encoding="utf-8")) if config.is_file() else {}
+        config = self.controller.root / "art-res" / "host-tools.local.json"
+        try:
+            loaded = json.loads(config.read_text(encoding="utf-8")) if config.is_file() else {}
+            local = loaded if isinstance(loaded, dict) else {}
+        except (OSError, ValueError, TypeError):
+            local = {}
         self.tool_dir.setText(os.environ.get("ART_WINDOWS_TOOLS") or local.get("windows_tools", "")); self.backend_label.setText(f"{status['label']}  ·  {len(status['tools']) - len(status['missing'])}/{len(status['tools'])} 个外部工具已找到")
         self.capability_table.setRowCount(0)
         for name, ready in status["capabilities"].items():
@@ -358,13 +623,73 @@ class ArtWindow(QMainWindow):
         return [self.inputs[str(i.row())]["path"] for i in self.input_table.selectionModel().selectedRows() if str(i.row()) in self.inputs]
 
     def _extract(self):
-        project = self._require_project(); paths = self._selected_inputs()
-        if project and paths: self._start("extract", project=project, sources=paths, deep=self.deep.isChecked())
+        project = self._require_project(); rows = self.input_table.selectionModel().selectedRows(); paths = self._selected_inputs()
+        if not project or not paths:
+            return
+        # Match the CLI's selective selectors when the chosen input is a
+        # payload or super container.  Mixed selections stay batch based.
+        if len(rows) == 1:
+            item = self.inputs.get(str(rows[0].row()))
+            if item and item.get("format") in {"payload", "super"}:
+                self._extract_format(item["format"])
+                return
+        self._start("extract", project=project, sources=paths, deep=self.deep.isChecked())
 
     def _extract_format(self, requested):
         project = self._require_project(); maps = {"img": {"ext", "erofs", "sparse", "boot", "vendor_boot"}, "payload": {"payload"}, "dat": {"dat"}, "dat.br": {"dat.br"}, "win": {"win"}, "super": {"super"}}
         selected = [self.inputs[str(i.row())] for i in self.input_table.selectionModel().selectedRows() if str(i.row()) in self.inputs]; matches = [x for x in selected if x["format"] in maps[requested]] or [x for x in self.inputs.values() if x["format"] in maps[requested]]
-        if project and matches: self._start("extract", project=project, sources=[x["path"] for x in matches], deep=self.deep.isChecked())
+        if not project or not matches:
+            return
+        # The CLI lets users extract only selected logical partitions from a
+        # payload/super container.  Ask for that selection here; other input
+        # formats keep the normal batch behavior.
+        if requested in {"payload", "super"} and len(matches) == 1:
+            source = matches[0]["path"]
+            try:
+                if requested == "payload":
+                    entries = self.controller.payload_partitions(project, source)
+                    names = self._choose_partitions("选择 Payload 分区", entries,
+                                                    lambda item: f"{item['name']}  ·  {size_text(item.get('size', 0))}")
+                    if not names:
+                        if names == []:
+                            QMessageBox.information(self, "选择分区", "请至少选择一个 Payload 分区。")
+                        return
+                    self._start("extract", project=project, sources=[source], deep=self.deep.isChecked(), payload_partitions=names)
+                else:
+                    entries = self.controller.super_partitions(project, source)
+                    names = self._choose_partitions("选择 super 逻辑分区", entries, str)
+                    if not names:
+                        if names == []:
+                            QMessageBox.information(self, "选择分区", "请至少选择一个 super 逻辑分区。")
+                        return
+                    self._start("extract", project=project, sources=[source], deep=self.deep.isChecked(), super_partitions=names)
+            except Exception as error:
+                QMessageBox.critical(self, "读取分区失败", str(error))
+            return
+        self._start("extract", project=project, sources=[x["path"] for x in matches], deep=self.deep.isChecked())
+
+    def _choose_partitions(self, title, entries, label):
+        """Return checked partition names, or None when the dialog is cancelled."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setMinimumSize(430, 420)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("请选择要提取的分区（默认全选）", objectName="muted"))
+        listing = QListWidget()
+        for entry in entries:
+            name = entry.get("name") if isinstance(entry, dict) else str(entry)
+            item = QListWidgetItem(label(entry) if isinstance(entry, dict) else str(entry), listing)
+            item.setData(Qt.UserRole, name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+        layout.addWidget(listing, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return [listing.item(index).data(Qt.UserRole) for index in range(listing.count())
+                if listing.item(index).checkState() == Qt.Checked]
 
     def _convert(self, target):
         project = self._require_project(); paths = self._selected_inputs()
@@ -376,7 +701,12 @@ class ArtWindow(QMainWindow):
         options = self._repack_options(len(selection))
         if options is None: return
         params = {"project": project, "sparse": options.pop("sparse"), "target": {"IMG": "img", "DAT": "dat", "DAT.BR": "dat.br"}[self.repack_target.currentText()], **options}
-        operation = "repack" if len(selection) == 1 else "repack_batch"; params["partition" if operation == "repack" else "partitions"] = selection; self._start(operation, **params)
+        operation = "repack" if len(selection) == 1 else "repack_batch"
+        # The single-partition worker accepts one validated name; passing the
+        # one-element list used by the multi-select table makes
+        # ProjectLayout.validate_component raise a confusing TypeError.
+        params["partition" if operation == "repack" else "partitions"] = selection[0] if operation == "repack" else selection
+        self._start(operation, **params)
 
     def _repack_options(self, count):
         dialog = QDialog(self); dialog.setWindowTitle("回包参数"); form = QFormLayout(dialog); fs = QComboBox(); fs.addItems(["自动（按原始文件系统）", "EXT4", "EROFS"]); size = QComboBox(); size.addItems(["保留原始尺寸", "自动估算", "自定义 MiB"]); custom = QLineEdit(); comp = QComboBox(); comp.addItems(["lz4hc", "lz4", "zstd", "lzma"]); level = QSpinBox(); level.setRange(1, 12); level.setValue(9); sparse = QCheckBox("输出 Android Sparse 镜像"); form.addRow(QLabel(f"已选择 {count} 个分区")); form.addRow("文件系统", fs); form.addRow("镜像大小", size); form.addRow("自定义 MiB", custom); form.addRow("EROFS 压缩", comp); form.addRow("压缩等级", level); form.addRow(sparse); buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
@@ -394,6 +724,9 @@ class ArtWindow(QMainWindow):
         if project and sources: self._start("repack_super", project=project, sources=sources, super_type={"A-only": 0, "A/B": 1, "Virtual A/B": 2}[self.super_type.currentText()], sparse=self.super_sparse.isChecked())
 
     def _thread_call(self, fn, message):
+        if self.process is not None or self._thread_busy:
+            return
+        self._thread_busy = True
         self._busy(True); self.status.setText(message)
         def run():
             try: self.events.put({"event": "result", "data": {"outputs": fn()}})
@@ -402,7 +735,7 @@ class ArtWindow(QMainWindow):
         threading.Thread(target=run, daemon=True).start()
 
     def _start(self, operation, **params):
-        if self.process is not None: return
+        if self.process is not None or self._thread_busy: return
         try: self.process = self.controller.start_job(self.controller.job_request(operation, **params))
         except Exception as e: QMessageBox.critical(self, "无法启动任务", str(e)); return
         self.cancelled = False; self._busy(True); self.status.setText("任务运行中…"); self._log(f"开始任务：{operation}  ·  {params.get('project', '')}")
@@ -415,6 +748,8 @@ class ArtWindow(QMainWindow):
         threading.Thread(target=read, daemon=True).start()
 
     def _busy(self, busy):
+        for button in self._action_buttons:
+            button.setEnabled(not busy)
         self.cancel_btn.setEnabled(busy and self.process is not None); self.progress.setVisible(busy)
 
     def _poll(self):
@@ -426,9 +761,22 @@ class ArtWindow(QMainWindow):
             elif kind == "progress": self.status.setText(event.get("message", "任务运行中…"))
             elif kind == "error": self._log("失败：" + event.get("message", "")); self.status.setText("任务失败 · 详情见日志")
             elif kind == "result":
-                outputs = event.get("data", {}).get("outputs", []); self._log_many(["输出：" + str(x) for x in outputs]); self.status.setText(f"任务完成 · {len(outputs)} 个产物")
+                data = event.get("data", {})
+                outputs = data.get("outputs", []) if isinstance(data, dict) else []
+                if isinstance(outputs, dict):
+                    self._log(json.dumps(outputs, ensure_ascii=False, indent=2))
+                    count = len(outputs)
+                elif isinstance(outputs, (list, tuple)):
+                    self._log_many(["输出：" + str(x) for x in outputs]); count = len(outputs)
+                else:
+                    self._log("输出：" + str(outputs)); count = 1
+                self.status.setText(f"任务完成 · {count} 个结果")
             elif kind == "toolchain": self._log_many(["已下载工具：" + x for x in event.get("data", {}).get("downloaded", [])]); self.refresh_runtime()
-            elif kind == "finished": self.process = None; self._busy(False); self.refresh()
+            elif kind == "finished":
+                self.process = None
+                self._thread_busy = False
+                self._busy(False)
+                self.refresh()
 
     def _log(self, text): self._log_many([text])
     def _log_many(self, lines):

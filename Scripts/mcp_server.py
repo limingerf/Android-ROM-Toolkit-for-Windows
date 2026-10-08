@@ -25,6 +25,11 @@ TOOLS = [
     {"name": "art_repack_partition", "description": "将工作区分区回包为 IMG、DAT 或 DAT.BR。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "partition": {"type": "string"}, "target": {"type": "string", "enum": ["img", "dat", "dat.br"]}, "sparse": {"type": "boolean"}}, "required": ["project", "partition"]}},
     {"name": "art_repack_super", "description": "使用 INPUT/OUT 中的分区镜像合成 super.img。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "sources": {"type": "array", "items": {"type": "string"}}, "super_type": {"type": "integer", "enum": [0, 1, 2]}, "sparse": {"type": "boolean"}}, "required": ["project", "sources"]}},
     {"name": "art_list_outputs", "description": "列出工程 OUT 目录中的产物。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}}, "required": ["project"]}},
+    {"name": "art_delete_project", "description": "删除工程目录（仅允许工程根目录下的 DNA_* 工程）。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}}, "required": ["project"]}},
+    {"name": "art_get_settings", "description": "读取原版 CLI 的合成、EROFS、SUPER 与 DAT 设置。", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "art_update_settings", "description": "更新原版 CLI 的合成、EROFS、SUPER 与 DAT 设置。", "inputSchema": {"type": "object", "properties": {"updates": {"type": "object"}}, "required": ["updates"]}},
+    {"name": "art_payload_partitions", "description": "列出 INPUT/payload.bin 中可选择提取的分区。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "source": {"type": "string"}}, "required": ["project", "source"]}},
+    {"name": "art_super_partitions", "description": "读取 INPUT/super.img 中的逻辑分区列表。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "source": {"type": "string"}}, "required": ["project", "source"]}},
 ]
 
 
@@ -48,6 +53,11 @@ class McpServer:
             "art_repack_partition": lambda: self.controller.run_job("repack", project=args.get("project", ""), partition=args.get("partition", ""), target=args.get("target", "img"), sparse=args.get("sparse", False)),
             "art_repack_super": lambda: self.controller.repack_super(args.get("project", ""), args.get("sources", []), args.get("super_type", 0), args.get("sparse", False)),
             "art_list_outputs": lambda: self.controller.list_outputs(args.get("project", "")),
+            "art_delete_project": lambda: self.controller.delete_project(args.get("project", "")),
+            "art_get_settings": lambda: self.controller.get_settings(),
+            "art_update_settings": lambda: self.controller.update_settings(args.get("updates") or {}),
+            "art_payload_partitions": lambda: self.controller.payload_partitions(args.get("project", ""), args.get("source", "")),
+            "art_super_partitions": lambda: self.controller.super_partitions(args.get("project", ""), args.get("source", "")),
         }
         if name not in operations:
             raise ValueError(f"未知工具: {name}")
@@ -130,6 +140,26 @@ def main(root=None):
         @server.tool()
         def art_list_outputs(project: str) -> list[dict]:
             return controller.list_outputs(project)
+
+        @server.tool()
+        def art_delete_project(project: str) -> dict:
+            return controller.delete_project(project)
+
+        @server.tool()
+        def art_get_settings() -> dict:
+            return controller.get_settings()
+
+        @server.tool()
+        def art_update_settings(updates: dict) -> dict:
+            return controller.update_settings(updates)
+
+        @server.tool()
+        def art_payload_partitions(project: str, source: str) -> list[dict]:
+            return controller.payload_partitions(project, source)
+
+        @server.tool()
+        def art_super_partitions(project: str, source: str) -> list[str]:
+            return controller.super_partitions(project, source)
 
         server.run(transport="stdio")
         return

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from Scripts.Platform.runtime import bootstrap_windows_tools, detect_toolchain, process_options
 from Scripts.Primary.WorkSpace import ProjectLayout
+from Scripts.Primary.Settings import _SETUP_DEFAULTS
 
 ROOT = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
 
@@ -41,6 +42,99 @@ class ArtController:
         result = bootstrap_windows_tools(self.root, progress=progress)
         self.toolchain = detect_toolchain(self.root)
         return result
+
+    # The interactive CLI exposes project deletion, setup editing and
+    # selective payload/super inspection.  Keep these operations in the
+    # controller so the Qt front end and MCP use the same path validation and
+    # never have to reach into the legacy ``V`` globals.
+    def delete_project(self, project: str) -> dict:
+        """Delete a project after enforcing the direct-child/safe-layout rule."""
+        project_dir = Path(project).expanduser()
+        if not project_dir.is_absolute():
+            project_dir = self.root / project_dir
+        try:
+            project_dir = project_dir.resolve()
+            project_dir.relative_to(self.root)
+        except ValueError as error:
+            raise ValueError("工程必须位于工程根目录下") from error
+        if project_dir.parent != self.root or not project_dir.name.startswith("DNA_"):
+            raise ValueError("工程名称或路径无效")
+        if project_dir.is_symlink() or not project_dir.is_dir():
+            raise ValueError("工程目录不存在或不是目录")
+        shutil.rmtree(project_dir)
+        return {"name": project_dir.name, "deleted": True}
+
+    def get_settings(self) -> dict:
+        """Read the CLI manifest, filling newly introduced defaults."""
+        path = self.root / "art-res" / "settings.json"
+        values = dict(_SETUP_DEFAULTS)
+        try:
+            if path.is_file():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    values.update({str(k): str(v) for k, v in loaded.items()})
+        except (OSError, ValueError, TypeError):
+            pass
+        return values
+
+    def update_settings(self, updates: dict) -> dict:
+        """Persist supported CLI settings and reject unknown keys."""
+        if not isinstance(updates, dict):
+            raise ValueError("设置必须是对象")
+        values = self.get_settings()
+        unknown = sorted(set(updates) - set(_SETUP_DEFAULTS))
+        if unknown:
+            raise ValueError(f"不支持的设置项：{', '.join(unknown)}")
+        values.update({str(k): str(v) for k, v in updates.items()})
+        # Mirror Settings.validate_default_env_setup without terminating the
+        # GUI process via sys.exit().
+        for key in ("REPACK_EROFS_IMG", "REPACK_SPARSE_IMG", "REPACK_TO_RW", "RESIZE_IMG"):
+            if values.get(key) not in {"0", "1"}:
+                raise ValueError(f"{key} 必须为 0 或 1")
+        if values.get("RESIZE_EROFSIMG") not in {"0", "1", "2"}:
+            raise ValueError("RESIZE_EROFSIMG 必须为 0、1 或 2")
+        try:
+            if not 0 <= int(values.get("REPACK_BR_LEVEL", "3")) <= 9:
+                raise ValueError
+            if not 1 <= int(values.get("UNPACK_SPLIT_DAT", "15")) <= 999:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ValueError("BROTLI 等级应为 0-9，DAT 分段数应为 1-999")
+        path = self.root / "art-res" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(values, ensure_ascii=False, indent=4), encoding="utf-8")
+        return values
+
+    def payload_partitions(self, project: str, source: str) -> list[dict]:
+        """Return payload partition names/sizes for a GUI selection dialog."""
+        layout = self._layout(project)
+        path = Path(source).expanduser().resolve()
+        if path.parent != layout.input_dir.resolve() or not path.is_file():
+            raise ValueError("Payload 必须位于该工程 INPUT 目录")
+        if self.inspect_input(path).get("format") != "payload":
+            raise ValueError("选择的文件不是 payload.bin")
+        from Scripts.Extract.payload import info
+        return [{"name": name, "size": size} for name, size in info(path)]
+
+    def super_partitions(self, project: str, source: str) -> list[str]:
+        """Return logical partitions in a super image for selective extraction."""
+        layout = self._layout(project)
+        path = Path(source).expanduser().resolve()
+        if path.parent != layout.input_dir.resolve() or not path.is_file():
+            raise ValueError("super 镜像必须位于该工程 INPUT 目录")
+        if self.inspect_input(path).get("format") != "super":
+            raise ValueError("选择的文件不是 super.img")
+        from Scripts.Primary.SuperTools import LpUnpack, _SparseRawCache
+        # Keep sparse conversion files in the workspace temp area and always
+        # clear the shared cache after the metadata-only query.  Without this
+        # cleanup a second GUI query could reuse a deleted path.
+        unpacker = LpUnpack(SUPER_IMAGE=str(path), OUTPUT_DIR=None, SHOW_INFO=False,
+                            TEMP_DIR=str(layout.workspace_dir))
+        try:
+            return list(unpacker.get_info())
+        finally:
+            unpacker.close()
+            _SparseRawCache.cleanup_all()
 
     def _layout(self, project: str, *, create=False) -> ProjectLayout:
         path = Path(project).expanduser()

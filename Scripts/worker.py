@@ -278,7 +278,7 @@ def _convert(controller, layout, stage, params):
     destination = stage.out_dir / (source.stem + suffix)
     function = sparse_to_raw if target == "raw" else raw_to_sparse
     function(str(source), str(destination), temp_dir=str(stage.workspace_dir))
-    return {"outputs": _publish([(destination, layout.out_dir / destination.name)]),
+    return {"outputs": _publish([(destination, layout.out_dir / destination.name)], replace=True),
             "format": get_file_type(destination) if destination.exists() else target}
 
 def _repack(controller, layout, stage, params):
@@ -343,7 +343,7 @@ def _repack(controller, layout, stage, params):
         if params.get("_defer_publish"):
             return {"staged_artifacts": [str(passthrough)],
                     "format": "img", "validation": "原镜像直通，保留 vendor/odm 原始几何结构；e2fsck -fn 通过"}
-        return {"outputs": _publish([(passthrough, layout.out_dir / passthrough.name)]),
+        return {"outputs": _publish([(passthrough, layout.out_dir / passthrough.name)], replace=True),
                 "format": "img", "validation": "原镜像直通，保留 vendor/odm 原始几何结构；e2fsck -fn 通过"}
     if fixed_geometry:
         raise ValueError("vendor/odm 工作区已修改，不能使用普通 EXT4 重建；请使用原位替换流程，或恢复为未修改状态")
@@ -392,7 +392,7 @@ def _repack(controller, layout, stage, params):
         return {"staged_artifacts": [str(path) for path in artifacts], "format": target,
                 "validation": validation}
     pairs = [(path, layout.out_dir / path.name) for path in artifacts]
-    return {"outputs": _publish(pairs), "format": target,
+    return {"outputs": _publish(pairs, replace=True), "format": target,
             "validation": validation}
 
 
@@ -418,7 +418,7 @@ def _repack_batch(controller, layout, stage, params):
             validations.append(f"{partition}: {result['validation']}")
     _emit("progress", current=len(partitions), total=len(partitions), message="批量回包完成")
     artifacts = sorted(path for path in collected.iterdir() if path.is_file())
-    outputs = _publish([(path, layout.out_dir / path.name) for path in artifacts])
+    outputs = _publish([(path, layout.out_dir / path.name) for path in artifacts], replace=True)
     return {"outputs": outputs, "format": params.get("target", "img"),
             "validation": "；".join(validations)}
 
@@ -438,13 +438,19 @@ def _repack_super(controller, layout, stage, params):
             raise ValueError("super 输入必须是工程 INPUT 或 OUT 下的 IMG")
         destination = stage.input_dir / source.name
         shutil.copyfile(source, destination)
-        copied.append((source.stem.removesuffix("_a").removesuffix("_b"), str(destination)))
+        # ``Path.stem`` leaves an extra suffix for ``system_a.sparse.img``
+        # and ``system_a.raw.img``.  Use the canonical image-name parser so
+        # sparse/raw variants are grouped into the same logical partition.
+        logical_name = partition_name(source)
+        if logical_name.endswith(("_a", "_b")):
+            logical_name = logical_name[:-2]
+        copied.append((logical_name, str(destination)))
     from Scripts.ReMake.super import repack_super
     repack_super(copied, super_type, 1 if params.get("sparse", False) else 0)
     artifacts = [p for p in stage.out_dir.iterdir() if p.is_file()]
     if not artifacts:
         raise RuntimeError("super 回包失败，未生成产物")
-    return {"outputs": _publish([(path, layout.out_dir / path.name) for path in artifacts]),
+    return {"outputs": _publish([(path, layout.out_dir / path.name) for path in artifacts], replace=True),
             "format": "super", "super_type": super_type}
 
 def main():

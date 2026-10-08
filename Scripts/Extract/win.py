@@ -112,7 +112,14 @@ def decompress_win(infile_list):
                     _safe_extract_tar(archive, staged_partition)
                 print(f'> {partition} TAR 分解完成')
             else:
-                input('未知格式')
+                # The GUI/worker path runs with V.JM=True and has no stdin.
+                # Never fall back to the old interactive prompt here: an
+                # unknown WIN archive must be reported and returned instead
+                # of raising EOFError and aborting the whole batch.
+                message = f'> {partition} WIN 内容格式未知，已跳过'
+                print(message)
+                if not getattr(V, 'JM', False):
+                    input('按回车返回')
         except (LayoutError, OSError, tarfile.TarError) as error:
             print(f'> {partition} WIN 分解失败: {error}')
         finally:
