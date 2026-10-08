@@ -66,7 +66,13 @@ class ArtApp(Window):
                              title="Android ROM Toolkit for Windows", size=(1200, 820))
         else:
             super().__init__()
+        # Build the complete widget tree while hidden.  Tk otherwise exposes
+        # the native black erase background before pack/grid has finished.
+        self.withdraw()
         self.configure(background=PALETTE["bg"])
+        self._background = tk.Frame(self, bg=PALETTE["bg"], bd=0, highlightthickness=0)
+        self._background.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._background.lower()
         self.title("Android ROM Toolkit for Windows")
         resource_root = Path(getattr(sys, "_MEIPASS", ROOT))
         icon_paths = (resource_root / "assets" / "android-rom-toolkit.ico",
@@ -130,28 +136,10 @@ class ArtApp(Window):
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Configure>", self._on_configure)
         self._build_ui()
-        self._enable_windows_compositing()
+        self._background.configure(bg=PALETTE["bg"])
+        self.update_idletasks()
+        self.deiconify()
         self.after(80, self._poll)
-
-    def _enable_windows_compositing(self):
-        """Let Windows compose child controls into one buffered resize frame."""
-        if os.name != "nt":
-            return
-        try:
-            hwnd = self.winfo_id()
-            user32 = ctypes.windll.user32
-            get_long = user32.GetWindowLongPtrW
-            set_long = user32.SetWindowLongPtrW
-            get_long.restype = ctypes.c_ssize_t
-            set_long.restype = ctypes.c_ssize_t
-            exstyle = get_long(hwnd, -20)
-            set_long(hwnd, -20, exstyle | 0x02000000)  # WS_EX_COMPOSITED
-            # Clip children while the frame is resized so exposed parent
-            # pixels never erase over a child widget.
-            style = get_long(hwnd, -16)
-            set_long(hwnd, -16, style | 0x02000000)  # WS_CLIPCHILDREN
-        except (AttributeError, OSError, tk.TclError):
-            pass
 
     def _settings_path(self):
         path = self.controller.root / "art-res" / "ui-settings.json"
@@ -177,6 +165,8 @@ class ArtApp(Window):
         PALETTE.clear()
         PALETTE.update(THEME_PALETTES[self.ui_theme])
         self.configure(bg=PALETTE["bg"])
+        if hasattr(self, "_background"):
+            self._background.configure(bg=PALETTE["bg"])
         if tb:
             self.style.theme_use("flatly" if self.ui_theme == "light" else "darkly")
 
