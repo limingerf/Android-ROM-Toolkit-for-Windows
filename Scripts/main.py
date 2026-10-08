@@ -76,6 +76,38 @@ def _configure_stdio_encoding():
 _restore_windowed_stdio()
 _configure_stdio_encoding()
 
+
+_QT_DLL_HANDLES = []
+
+
+def _configure_qt_dll_paths():
+    """Make PySide6's sibling DLLs visible before importing QtCore.
+
+    PyInstaller's one-file bootloader preserves the ``PySide6`` and
+    ``shiboken6`` directories inside ``_MEIPASS``.  Windows DLL search does
+    not automatically search those sibling directories when a Qt extension
+    is imported, which can otherwise produce ``DLL load failed`` on a clean
+    machine even though all Qt binaries are present in the archive.
+    """
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    if add_dll_directory is None:
+        return
+    base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    for relative in (Path("."), Path("PySide6"), Path("shiboken6")):
+        path = base / relative
+        if path.is_dir():
+            try:
+                # Keep the returned handle alive for the whole process.  The
+                # directory is removed again as soon as the handle is GC'd.
+                _QT_DLL_HANDLES.append(add_dll_directory(str(path)))
+            except OSError:
+                pass
+
+
+_configure_qt_dll_paths()
+
 def exception_handler(exception_type, exception, traceback):
     del traceback
     print("很抱歉，工具出现错误， 请把以下日志提交给开发者：")

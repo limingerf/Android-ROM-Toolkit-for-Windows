@@ -62,6 +62,7 @@ class ArtWindow(QMainWindow):
         self.partitions = {}
         self.current_page = 0
         self._log_lines = 0
+        self.ui_theme = self._load_theme()
         self.setWindowTitle("Android ROM Toolkit for Windows")
         self.setMinimumSize(1040, 700)
         self.resize(1240, 800)
@@ -87,7 +88,7 @@ class ArtWindow(QMainWindow):
         # Fusion uses Qt's cross-platform controls and lets DWM composite one
         # backing store instead of hundreds of Tk child windows.
         QApplication.instance().setStyle("Fusion")
-        QApplication.instance().setStyleSheet("""
+        sheet = """
             QWidget { font-family: 'Microsoft YaHei UI'; font-size: 10pt; color: #1f2937; }
             QMainWindow, QWidget#root, QStackedWidget { background: #f4f7fb; }
             QFrame#sidebar { background: #edf2f8; border: 0; }
@@ -110,7 +111,44 @@ class ArtWindow(QMainWindow):
             QPlainTextEdit { background: #f3f6fa; border: 1px solid #d7e0eb; font-family: Consolas; }
             QProgressBar { border: 0; background: #e7edf5; border-radius: 4px; height: 8px; text-visible: false; }
             QProgressBar::chunk { background: #376fd1; border-radius: 4px; }
-        """)
+        """
+        if self.ui_theme == "dark":
+            sheet += """
+                QWidget { color: #ecf2fc; }
+                QMainWindow, QWidget#root, QStackedWidget { background: #101521; }
+                QFrame#sidebar, QHeaderView::section { background: #121a29; }
+                QFrame#card, QGroupBox, QTableWidget, QLineEdit, QComboBox, QSpinBox { background: #182031; border-color: #33415a; }
+                QLabel#muted { color: #93a4bc; }
+                QPushButton { background: #182031; color: #ecf2fc; border-color: #33415a; }
+                QPushButton:hover { background: #233653; }
+                QListWidget#nav::item:selected { background: #233653; color: #ecf2fc; }
+                QPlainTextEdit { background: #0e1521; color: #cbd9ef; border-color: #33415a; }
+                QTableWidget { alternate-background-color: #1d293d; gridline-color: #2a3850; }
+            """
+        QApplication.instance().setStyleSheet(sheet)
+
+    def _settings_path(self):
+        path = self.controller.root / "art-res" / "ui-settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _load_theme(self):
+        try:
+            value = json.loads(self._settings_path().read_text(encoding="utf-8")).get("theme", "light")
+            return value if value in {"light", "dark"} else "light"
+        except (OSError, ValueError, TypeError):
+            return "light"
+
+    def _save_theme(self):
+        try:
+            self._settings_path().write_text(json.dumps({"theme": self.ui_theme}, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _change_theme(self, value):
+        self.ui_theme = "dark" if value == "深色" else "light"
+        self._save_theme()
+        self._apply_style()
 
     def _build_ui(self):
         root = QWidget(objectName="root")
@@ -226,7 +264,7 @@ class ArtWindow(QMainWindow):
     def _runtime_page(self):
         page = QWidget(); layout = QVBoxLayout(page)
         box, bl = self._card("界面外观", "Qt 使用系统级窗口合成；浅色主题为默认")
-        row = QHBoxLayout(); row.addWidget(QLabel("主题")); self.theme = QComboBox(); self.theme.addItems(["浅色", "深色"]); row.addWidget(self.theme); row.addStretch(); bl.addLayout(row); layout.addWidget(box)
+        row = QHBoxLayout(); row.addWidget(QLabel("主题")); self.theme = QComboBox(); self.theme.addItems(["浅色", "深色"]); self.theme.setCurrentText("深色" if self.ui_theme == "dark" else "浅色"); self.theme.currentTextChanged.connect(self._change_theme); row.addWidget(self.theme); row.addStretch(); bl.addLayout(row); layout.addWidget(box)
         box, bl = self._card("运行后端", "Windows 原生无需 WSL；缺失工具可自动补齐")
         row = QHBoxLayout(); self.backend = QComboBox(); self.backend.addItems(["native", "wsl"]); self.tool_dir = QLineEdit(); row.addWidget(self.backend); row.addWidget(self.tool_dir, 1); row.addWidget(self._button("浏览", self._browse_tools)); row.addWidget(self._button("保存配置", self._save_tools, True)); bl.addLayout(row); self.backend_label = QLabel(objectName="muted"); bl.addWidget(self.backend_label); bl.addWidget(self._button("自动补齐 Windows 工具", self._bootstrap_tools)); layout.addWidget(box)
         box, bl = self._card("功能可用性", "可用状态依据工具文件检测；实际命令执行结果以任务日志为准")
