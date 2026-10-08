@@ -55,6 +55,13 @@ def _prepare(source, fsconfig, contexts, dumpinfo):
         if int(size) <= 1048576:
             size = 1048576
 
+    requested_size = V.SETUP_MANIFEST.get("REPACK_IMAGE_SIZE", "auto")
+    if str(requested_size).lower() not in {"", "auto", "automatic"}:
+        try:
+            size = max(1048576, int(float(requested_size)) * 1024 * 1024)
+        except (TypeError, ValueError):
+            pass
+
     new_distance = os.path.join(V.out, f"{label}_new.img")
     if os.path.isfile(new_distance):
         os.remove(new_distance)
@@ -72,10 +79,10 @@ def _write_image(state, fsconfig, contexts, source, flag):
     label = state["label"]
     distance = state["distance"]
     new_distance = state["new_distance"]
-    level = V.SETUP_MANIFEST.get("EROFS_LEVEL", "1")
-    erofs_format = (
-        "lz4hc" if V.SETUP_MANIFEST["RESIZE_EROFSIMG"] == "1" else "lz4"
-    )
+    level = V.SETUP_MANIFEST.get("REPACK_EROFS_LEVEL", V.SETUP_MANIFEST.get("EROFS_LEVEL", "1"))
+    erofs_format = V.SETUP_MANIFEST.get("REPACK_EROFS_COMPRESSOR")
+    if not erofs_format:
+        erofs_format = "lz4hc" if V.SETUP_MANIFEST["RESIZE_EROFSIMG"] == "1" else "lz4"
     erofs_compress = (
         f"{erofs_format},{level}" if erofs_format != "lz4" else erofs_format
     )

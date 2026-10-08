@@ -60,6 +60,13 @@ def _prepare(source, fsconfig, contexts, dumpinfo):
             os.path.join(source, "system", "build.prop")
         ) else f"/{label}"
 
+    requested_size = V.SETUP_MANIFEST.get("REPACK_IMAGE_SIZE", "auto")
+    if str(requested_size).lower() not in {"", "auto", "automatic"}:
+        try:
+            size = max(1048576, int(float(requested_size)) * 1024 * 1024)
+        except (TypeError, ValueError):
+            pass
+
     block_size = 4096
     blocks = ceil(int(size) / block_size)
     read_mode = "ro" if fsize else "rw"

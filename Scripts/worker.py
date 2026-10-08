@@ -290,7 +290,30 @@ def _repack(controller, layout, stage, params):
     original_format = next((p["format"] for p in controller.list_partitions(str(layout.project_dir)) if p["name"] == partition), "unknown")
     if original_format == "unknown":
         raise ValueError("缺少原始分区 metadata，不能确定回包格式")
-    fixed_geometry = original_format == "ext" and partition.removesuffix("_a").removesuffix("_b") in {"vendor", "odm"}
+    source_format = original_format
+    output_format = params.get("filesystem", original_format)
+    if source_format in {"boot", "vendor_boot"} and output_format not in {"auto", source_format}:
+        raise ValueError("boot 镜像只能按原格式回包")
+    if output_format not in {"ext", "erofs"}:
+        output_format = original_format
+    if source_format == "ext" and partition.removesuffix("_a").removesuffix("_b") in {"vendor", "odm"} and output_format != "ext":
+        raise ValueError("vendor/odm 必须保持原始 EXT4 文件系统")
+    if output_format == "ext":
+        original_format = "ext"
+    elif output_format == "erofs":
+        original_format = "erofs"
+    V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] = params.get("image_size", "auto")
+    if V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] == "original":
+        original_source = _source_image(layout, partition)
+        if original_source:
+            V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] = str(max(1, (original_source.stat().st_size + 1048575) // 1048576))
+        else:
+            V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] = "auto"
+    if params.get("erofs_compressor"):
+        V.SETUP_MANIFEST["REPACK_EROFS_COMPRESSOR"] = params["erofs_compressor"]
+    if params.get("erofs_level") is not None:
+        V.SETUP_MANIFEST["REPACK_EROFS_LEVEL"] = str(params["erofs_level"])
+    fixed_geometry = source_format == "ext" and output_format == "ext" and partition.removesuffix("_a").removesuffix("_b") in {"vendor", "odm"}
     source_image = _source_image(layout, partition) if fixed_geometry else None
     baseline = layout.config_dir / f"{partition}_source.json"
     clean_workspace = False

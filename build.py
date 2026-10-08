@@ -95,6 +95,8 @@ def main() -> None:
          *(['--windowed'] if os.name == 'nt' else []),
          '--name', 'art',
          '--icon', str(ROOT / 'assets' / 'android-rom-toolkit.ico'),
+         '--add-data', f"{ROOT / 'assets' / 'android-rom-toolkit.ico'};assets",
+         '--add-data', f"{ROOT / 'assets' / 'android-rom-toolkit.png'};assets",
          '--distpath', str(DIST_DIR),
          '--workpath', str(BUILD_DIR),
          '--specpath', str(BUILD_DIR),

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import ctypes
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk as standard_ttk
 
@@ -51,6 +52,15 @@ class ArtApp(Window):
     def __init__(self, controller: ArtController):
         self.controller = controller
         self.ui_theme = self._load_theme()
+        if os.name == "nt":
+            try:
+                # Set before creating Tk so Windows assigns the same identity
+                # to the EXE, title bar, and taskbar button.
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                    "limingerf.AndroidROMToolkit.Windows"
+                )
+            except (AttributeError, OSError):
+                pass
         if tb:
             super().__init__(themename="flatly" if self.ui_theme == "light" else "darkly",
                              title="Android ROM Toolkit for Windows", size=(1200, 820))
@@ -58,16 +68,21 @@ class ArtApp(Window):
             super().__init__()
         self.configure(background=PALETTE["bg"])
         self.title("Android ROM Toolkit for Windows")
-        for icon_path in (ROOT / "assets" / "android-rom-toolkit.ico",
-                          ROOT / "art-res" / "android-rom-toolkit.ico"):
+        resource_root = Path(getattr(sys, "_MEIPASS", ROOT))
+        icon_paths = (resource_root / "assets" / "android-rom-toolkit.ico",
+                      ROOT / "assets" / "android-rom-toolkit.ico",
+                      ROOT / "art-res" / "android-rom-toolkit.ico")
+        for icon_path in icon_paths:
             if icon_path.is_file():
                 try:
                     self.iconbitmap(default=str(icon_path))
                 except tk.TclError:
                     pass
                 break
-        for icon_path in (ROOT / "assets" / "android-rom-toolkit.png",
-                          ROOT / "art-res" / "android-rom-toolkit.png"):
+        png_paths = (resource_root / "assets" / "android-rom-toolkit.png",
+                     ROOT / "assets" / "android-rom-toolkit.png",
+                     ROOT / "art-res" / "android-rom-toolkit.png")
+        for icon_path in png_paths:
             if icon_path.is_file():
                 try:
                     self._app_icon = tk.PhotoImage(file=str(icon_path))
@@ -75,6 +90,18 @@ class ArtApp(Window):
                 except tk.TclError:
                     pass
                 break
+        native_icon_path = next((path for path in icon_paths if path.is_file()), None)
+        if os.name == "nt" and native_icon_path is not None:
+            try:
+                user32 = ctypes.windll.user32
+                user32.LoadImageW.restype = ctypes.c_void_p
+                hicon = user32.LoadImageW(None, str(native_icon_path), 1, 32, 32, 0x10)
+                if hicon:
+                    self._native_icon = hicon
+                    user32.SendMessageW(self.winfo_id(), 0x0080, 0, hicon)
+                    user32.SendMessageW(self.winfo_id(), 0x0080, 1, hicon)
+            except (AttributeError, OSError, tk.TclError):
+                pass
         self.geometry("1200x820")
         self.minsize(980, 720)
         self.project_var = tk.StringVar()
@@ -90,6 +117,7 @@ class ArtApp(Window):
         self._deferred_logs = []
         self._resize_after = None
         self._resizing = False
+        self._resize_shield = None
         self.pages = {}
         self.nav = {}
         self.current_page = "workspace"
@@ -621,14 +649,75 @@ class ArtApp(Window):
         if not selection:
             messagebox.showinfo("选择分区", "请选择至少一个工作区分区进行回包。", parent=self)
             return
+        options = self._repack_options(selection)
+        if options is None:
+            return
         target = {"IMG": "img", "DAT": "dat", "DAT.BR": "dat.br"}[self.repack_target_var.get()]
         operation = "repack" if len(selection) == 1 else "repack_batch"
-        params = {"project": project, "sparse": self.sparse_var.get(), "target": target}
+        params = {"project": project, "sparse": options["sparse"], "target": target, **options}
         if operation == "repack":
             params["partition"] = selection[0]
         else:
             params["partitions"] = list(selection)
         self._start(operation, **params)
+
+    def _repack_options(self, selection):
+        dialog = tk.Toplevel(self)
+        dialog.title("回包参数")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        dialog.configure(bg=PALETTE["panel"])
+        dialog.grab_set()
+        result = {}
+        pad = {"padx": 14, "pady": 7}
+        body = tk.Frame(dialog, bg=PALETTE["panel"], padx=18, pady=16)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=f"已选择 {len(selection)} 个分区", bg=PALETTE["panel"], fg=PALETTE["text"],
+                 font=("Microsoft YaHei UI", 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", **pad)
+        tk.Label(body, text="文件系统", bg=PALETTE["panel"], fg=PALETTE["muted"]).grid(row=1, column=0, sticky="w", **pad)
+        filesystem = tk.StringVar(value="自动（按原始文件系统）")
+        ttk.Combobox(body, textvariable=filesystem, state="readonly", width=27,
+                     values=("自动（按原始文件系统）", "EXT4", "EROFS")).grid(row=1, column=1, sticky="ew", **pad)
+        tk.Label(body, text="镜像大小", bg=PALETTE["panel"], fg=PALETTE["muted"]).grid(row=2, column=0, sticky="w", **pad)
+        size_mode = tk.StringVar(value="自动估算")
+        ttk.Combobox(body, textvariable=size_mode, state="readonly", width=27,
+                     values=("保留原始尺寸", "自动估算", "自定义 MiB")).grid(row=2, column=1, sticky="ew", **pad)
+        tk.Label(body, text="自定义 MiB", bg=PALETTE["panel"], fg=PALETTE["muted"]).grid(row=3, column=0, sticky="w", **pad)
+        custom_size = tk.StringVar(value="")
+        ttk.Entry(body, textvariable=custom_size, width=29).grid(row=3, column=1, sticky="ew", **pad)
+        tk.Label(body, text="EROFS 压缩", bg=PALETTE["panel"], fg=PALETTE["muted"]).grid(row=4, column=0, sticky="w", **pad)
+        compressor = tk.StringVar(value="lz4hc")
+        ttk.Combobox(body, textvariable=compressor, state="readonly", width=27,
+                     values=("lz4hc", "lz4", "zstd", "lzma")).grid(row=4, column=1, sticky="ew", **pad)
+        tk.Label(body, text="压缩等级", bg=PALETTE["panel"], fg=PALETTE["muted"]).grid(row=5, column=0, sticky="w", **pad)
+        level = tk.StringVar(value="9")
+        ttk.Combobox(body, textvariable=level, state="readonly", width=27,
+                     values=tuple(str(i) for i in range(1, 13))).grid(row=5, column=1, sticky="ew", **pad)
+        sparse = tk.BooleanVar(value=self.sparse_var.get())
+        ttk.Checkbutton(body, text="输出 Android Sparse 镜像", variable=sparse).grid(row=6, column=0, columnspan=2, sticky="w", **pad)
+        hint = tk.Label(body, text="vendor/odm 会保留原始 EXT4 几何结构；修改后仍需原位替换流程。",
+                        bg=PALETTE["panel"], fg=PALETTE["muted"], wraplength=420, justify="left")
+        hint.grid(row=7, column=0, columnspan=2, sticky="w", **pad)
+        buttons = tk.Frame(body, bg=PALETTE["panel"])
+        buttons.grid(row=8, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        def accept():
+            selected_fs = {"自动（按原始文件系统）": "auto", "EXT4": "ext", "EROFS": "erofs"}[filesystem.get()]
+            selected_size = "auto"
+            if size_mode.get() == "保留原始尺寸":
+                selected_size = "original"
+            elif size_mode.get() == "自定义 MiB":
+                try:
+                    selected_size = str(max(1, int(float(custom_size.get()))))
+                except ValueError:
+                    messagebox.showerror("参数错误", "自定义镜像大小必须是 MiB 数字。", parent=dialog)
+                    return
+            result.update(filesystem=selected_fs, image_size=selected_size,
+                          erofs_compressor=compressor.get(), erofs_level=int(level.get()), sparse=sparse.get())
+            dialog.destroy()
+        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side="right", padx=(8, 0))
+        ttk.Button(buttons, text="开始回包", command=accept).pack(side="right")
+        self.wait_window(dialog)
+        return result or None
 
     def _repack_super(self):
         project = self._require_project()
@@ -742,6 +831,10 @@ class ArtApp(Window):
         if event.widget is not self:
             return
         self._resizing = True
+        if self._resize_shield is None:
+            self._resize_shield = tk.Frame(self, bg=PALETTE["bg"], cursor="size_nw_se")
+            self._resize_shield.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self._resize_shield.lift()
         # Paint the native window before Tk redraws the themed children. This
         # prevents the exposed area from briefly using the Windows black erase
         # background while dragging the frame.
@@ -758,11 +851,15 @@ class ArtApp(Window):
     def _finish_resize(self):
         self._resize_after = None
         self._resizing = False
+        if self._resize_shield is not None:
+            self._resize_shield.destroy()
+            self._resize_shield = None
         if self._deferred_logs:
             self._log_many(self._deferred_logs[:])
             self._deferred_logs.clear()
         if self.process is not None and not self.cancelled:
             self.progress.start(12)
+
 
     def _log(self, message):
         self._log_many([message])
