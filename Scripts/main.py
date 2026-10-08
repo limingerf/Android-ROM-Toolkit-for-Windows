@@ -108,6 +108,27 @@ def _configure_qt_dll_paths():
 
 _configure_qt_dll_paths()
 
+
+def _remove_incompatible_qt_icu():
+    """Do not let PyInstaller's ICU copy shadow Windows' ICU contract DLL.
+
+    Qt 6.12's Windows build imports the unsuffixed ICU symbols provided by
+    Windows.  A similarly named ICU 78 binary collected by PyInstaller only
+    exports suffixed symbols, causing WinError 127 while importing QtCore.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    for name in ("icuuc.dll", "icudt78.dll", "icuin.dll"):
+        for candidate in (base / name, base / "PySide6" / name):
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+_remove_incompatible_qt_icu()
+
 def exception_handler(exception_type, exception, traceback):
     del traceback
     print("很抱歉，工具出现错误， 请把以下日志提交给开发者：")

@@ -91,7 +91,7 @@ def main() -> None:
     result = subprocess.run(
         [sys.executable, '-m', 'PyInstaller',
          str(ROOT / 'Scripts' / 'main.py'),
-         '--onedir',
+         '--onefile',
          *(['--windowed'] if os.name == 'nt' else []),
          '--name', 'art',
          '--icon', str(ROOT / 'assets' / 'android-rom-toolkit.ico'),
@@ -112,11 +112,7 @@ def main() -> None:
     )
     log_file.write_text(result.stdout or '', encoding='utf-8')
 
-    # Use an onedir build for Qt.  Keeping Qt6Core/QtCore.pyd and the platform
-    # plugin beside the executable makes Windows DLL resolution deterministic
-    # on machines where one-file extraction cannot load sibling DLLs.
-    app_dist = DIST_DIR / 'art'
-    built_executable = app_dist / ('art.exe' if os.name == 'nt' else 'art')
+    built_executable = DIST_DIR / ('art.exe' if os.name == 'nt' else 'art')
     if result.returncode != 0 or not built_executable.is_file():
         print(f'\n  [ERROR] PyInstaller failed. See {log_file.name} for details.', file=sys.stderr)
         if result.stdout:
@@ -129,12 +125,7 @@ def main() -> None:
     _log('3/4', 'Assembling release directory...')
     release_dir = RELEASE_DIR
     release_dir.mkdir(parents=True, exist_ok=True)
-    for source in sorted(app_dist.iterdir()):
-        target = release_dir / source.name
-        if source.is_dir():
-            shutil.copytree(source, target, dirs_exist_ok=True)
-        else:
-            shutil.copy2(source, target)
+    shutil.copy2(built_executable, release_dir / built_executable.name)
     if os.name != 'nt':
         os.chmod(release_dir / built_executable.name, 0o755)
     copy_release_resources(release_dir)
