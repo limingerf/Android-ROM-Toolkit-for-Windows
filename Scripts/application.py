@@ -185,7 +185,7 @@ class ArtController:
                 for path in sorted(layout.out_dir.iterdir()) if path.is_file()]
 
     def job_request(self, operation: str, **params) -> dict:
-        if operation not in {"extract", "repack", "repack_super", "convert"}:
+        if operation not in {"extract", "repack", "repack_batch", "repack_super", "convert"}:
             raise ValueError("未知操作")
         if "project" in params:
             params["project"] = str(self._layout(params["project"]).project_dir)

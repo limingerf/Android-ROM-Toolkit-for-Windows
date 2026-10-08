@@ -37,9 +37,10 @@ def copy_release_resources(release_dir: Path) -> None:
     if resource_source.is_dir():
         shutil.copytree(resource_source, resource_target, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns('ui-settings.json', 'host-tools.local.json', '.wsl-ready-*'))
-    icon_source = ROOT / 'assets' / 'android-rom-toolkit.ico'
-    if icon_source.is_file():
-        shutil.copy2(icon_source, resource_target / icon_source.name)
+    for icon_name in ('android-rom-toolkit.ico', 'android-rom-toolkit.png'):
+        icon_source = ROOT / 'assets' / icon_name
+        if icon_source.is_file():
+            shutil.copy2(icon_source, resource_target / icon_source.name)
 
     for filename in ('setting.ini', 'LICENSE', 'README.md', 'ATTRIBUTIONS.md'):
         source = ROOT / filename

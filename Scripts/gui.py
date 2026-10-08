@@ -56,12 +56,22 @@ class ArtApp(Window):
                              title="Android ROM Toolkit for Windows", size=(1200, 820))
         else:
             super().__init__()
+        self.configure(background=PALETTE["bg"])
         self.title("Android ROM Toolkit for Windows")
         for icon_path in (ROOT / "assets" / "android-rom-toolkit.ico",
                           ROOT / "art-res" / "android-rom-toolkit.ico"):
             if icon_path.is_file():
                 try:
                     self.iconbitmap(default=str(icon_path))
+                except tk.TclError:
+                    pass
+                break
+        for icon_path in (ROOT / "assets" / "android-rom-toolkit.png",
+                          ROOT / "art-res" / "android-rom-toolkit.png"):
+            if icon_path.is_file():
+                try:
+                    self._app_icon = tk.PhotoImage(file=str(icon_path))
+                    self.iconphoto(True, self._app_icon)
                 except tk.TclError:
                     pass
                 break
@@ -608,11 +618,17 @@ class ArtApp(Window):
         selection = self.partition_tree.selection()
         if not project:
             return
-        if len(selection) != 1:
-            messagebox.showinfo("选择分区", "请选择一个工作区分区进行回包。", parent=self)
+        if not selection:
+            messagebox.showinfo("选择分区", "请选择至少一个工作区分区进行回包。", parent=self)
             return
         target = {"IMG": "img", "DAT": "dat", "DAT.BR": "dat.br"}[self.repack_target_var.get()]
-        self._start("repack", project=project, partition=selection[0], sparse=self.sparse_var.get(), target=target)
+        operation = "repack" if len(selection) == 1 else "repack_batch"
+        params = {"project": project, "sparse": self.sparse_var.get(), "target": target}
+        if operation == "repack":
+            params["partition"] = selection[0]
+        else:
+            params["partitions"] = list(selection)
+        self._start(operation, **params)
 
     def _repack_super(self):
         project = self._require_project()
@@ -726,6 +742,13 @@ class ArtApp(Window):
         if event.widget is not self:
             return
         self._resizing = True
+        # Paint the native window before Tk redraws the themed children. This
+        # prevents the exposed area from briefly using the Windows black erase
+        # background while dragging the frame.
+        try:
+            self.configure(background=PALETTE["bg"])
+        except tk.TclError:
+            pass
         if self.process is not None:
             self.progress.stop()
         if self._resize_after is not None:

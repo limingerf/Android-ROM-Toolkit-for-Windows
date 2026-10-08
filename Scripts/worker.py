@@ -155,6 +155,8 @@ def execute(request):
             return _convert(controller, layout, stage, params)
         if operation == "repack":
             return _repack(controller, layout, stage, params)
+        if operation == "repack_batch":
+            return _repack_batch(controller, layout, stage, params)
         if operation == "repack_super":
             return _repack_super(controller, layout, stage, params)
         raise ValueError("未知任务")
@@ -361,6 +363,23 @@ def _repack(controller, layout, stage, params):
     pairs = [(path, layout.out_dir / path.name) for path in artifacts]
     return {"outputs": _publish(pairs), "format": target,
             "validation": validation}
+
+
+def _repack_batch(controller, layout, stage, params):
+    partitions = params.get("partitions") or []
+    if not partitions:
+        raise ValueError("请选择至少一个工作区分区")
+    outputs = []
+    validations = []
+    for index, partition in enumerate(partitions):
+        _emit("progress", current=index, total=len(partitions), message=f"回包 {partition}")
+        result = _repack(controller, layout, stage, {**params, "partition": partition})
+        outputs.extend(result.get("outputs", []))
+        if result.get("validation"):
+            validations.append(f"{partition}: {result['validation']}")
+    _emit("progress", current=len(partitions), total=len(partitions), message="批量回包完成")
+    return {"outputs": outputs, "format": params.get("target", "img"),
+            "validation": "；".join(validations)}
 
 
 def _repack_super(controller, layout, stage, params):
