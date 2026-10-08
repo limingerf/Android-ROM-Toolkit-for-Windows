@@ -112,7 +112,7 @@ if __name__ == '__main__':
         worker_main()
         raise SystemExit(0)
     if args.gui:
-        from Scripts.gui import launch
+        from Scripts.qt_gui import launch
         from Scripts.application import ROOT
         launch(args.root or ROOT)
         raise SystemExit(0)

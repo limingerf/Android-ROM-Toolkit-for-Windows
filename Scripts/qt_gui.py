@@ -1,0 +1,442 @@
+"""Qt desktop interface for Android ROM Toolkit.
+
+The old interface was built from Tk widgets.  This module keeps the same
+controller and worker protocol while using Qt's native window/backing-store
+pipeline, which avoids the black repaint artefacts and resize stalls seen on
+some Windows DWM configurations.
+"""
+from __future__ import annotations
+
+import json
+import os
+import queue
+import re
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QIcon, QFont
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
+    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget, QHeaderView,
+)
+
+from Scripts.application import ArtController, ROOT
+from Scripts.Platform.runtime import CAPABILITIES, process_options
+
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+FORMAT_NAMES = {"ext": "EXT4", "erofs": "EROFS", "sparse": "Sparse", "boot": "Boot",
+                "vendor_boot": "Vendor boot", "payload": "Payload", "super": "Super",
+                "dat": "DAT", "dat.br": "DAT.BR", "win": "WIN", "zip": "ROM ZIP",
+                "unknown": "未识别"}
+STATE_NAMES = {"new": "可用", "incomplete": "未初始化", "unsupported": "旧版布局",
+               "invalid": "无效", "empty": "空工程"}
+
+
+def size_text(size):
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+
+
+class EventBridge(QObject):
+    event = Signal(dict)
+
+
+class ArtWindow(QMainWindow):
+    def __init__(self, controller: ArtController):
+        super().__init__()
+        self.controller = controller
+        self.events: queue.Queue = queue.Queue()
+        self.process = None
+        self.cancelled = False
+        self.projects = []
+        self.inputs = {}
+        self.partitions = {}
+        self.current_page = 0
+        self._log_lines = 0
+        self.setWindowTitle("Android ROM Toolkit for Windows")
+        self.setMinimumSize(1040, 700)
+        self.resize(1240, 800)
+        self._set_icon()
+        self._apply_style()
+        self._build_ui()
+        self.refresh()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._poll)
+        self.timer.start(80)
+
+    def _set_icon(self):
+        root = Path(getattr(sys, "_MEIPASS", ROOT))
+        for path in (root / "assets" / "android-rom-toolkit.ico",
+                     ROOT / "assets" / "android-rom-toolkit.ico",
+                     ROOT / "art-res" / "android-rom-toolkit.ico"):
+            if path.is_file():
+                self.setWindowIcon(QIcon(str(path)))
+                QApplication.instance().setWindowIcon(QIcon(str(path)))
+                return
+
+    def _apply_style(self):
+        # Fusion uses Qt's cross-platform controls and lets DWM composite one
+        # backing store instead of hundreds of Tk child windows.
+        QApplication.instance().setStyle("Fusion")
+        QApplication.instance().setStyleSheet("""
+            QWidget { font-family: 'Microsoft YaHei UI'; font-size: 10pt; color: #1f2937; }
+            QMainWindow, QWidget#root, QStackedWidget { background: #f4f7fb; }
+            QFrame#sidebar { background: #edf2f8; border: 0; }
+            QFrame#card, QGroupBox { background: #ffffff; border: 1px solid #d7e0eb; border-radius: 10px; }
+            QGroupBox { margin-top: 12px; padding: 18px 12px 12px 12px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 5px; font-weight: 600; }
+            QLabel#muted { color: #65758b; }
+            QLabel#title { font-size: 20pt; font-weight: 700; }
+            QPushButton { border: 1px solid #c7d3e3; border-radius: 6px; padding: 8px 15px; background: #fff; }
+            QPushButton:hover { background: #eaf1ff; border-color: #376fd1; }
+            QPushButton#primary { color: white; background: #376fd1; border-color: #376fd1; }
+            QPushButton#primary:hover { background: #2e5eb4; }
+            QPushButton:disabled { color: #98a5b5; background: #edf2f8; }
+            QListWidget#nav { background: transparent; border: 0; outline: 0; }
+            QListWidget#nav::item { padding: 12px 14px; margin: 3px 0; border-radius: 6px; color: #65758b; }
+            QListWidget#nav::item:selected { background: #dce8ff; color: #1f2937; }
+            QLineEdit, QComboBox, QSpinBox { background: #fff; border: 1px solid #c7d3e3; border-radius: 5px; padding: 6px; }
+            QTableWidget { background: #fff; alternate-background-color: #f7f9fc; border: 1px solid #d7e0eb; gridline-color: #e6ebf2; }
+            QHeaderView::section { background: #edf2f8; padding: 8px; border: 0; font-weight: 600; }
+            QPlainTextEdit { background: #f3f6fa; border: 1px solid #d7e0eb; font-family: Consolas; }
+            QProgressBar { border: 0; background: #e7edf5; border-radius: 4px; height: 8px; text-visible: false; }
+            QProgressBar::chunk { background: #376fd1; border-radius: 4px; }
+        """)
+
+    def _build_ui(self):
+        root = QWidget(objectName="root")
+        self.setCentralWidget(root)
+        shell = QHBoxLayout(root)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        sidebar = QFrame(objectName="sidebar")
+        sidebar.setFixedWidth(225)
+        side_layout = QVBoxLayout(sidebar)
+        side_layout.setContentsMargins(20, 28, 20, 20)
+        brand = QLabel("▣  A.R.T")
+        brand.setStyleSheet("font-size: 19pt; font-weight: 700; color: #1f2937;")
+        side_layout.addWidget(brand)
+        sub = QLabel("ANDROID ROM TOOLKIT")
+        sub.setObjectName("muted")
+        side_layout.addWidget(sub)
+        side_layout.addSpacing(22)
+        self.nav = QListWidget(objectName="nav")
+        self.nav.addItems(["工作台", "镜像处理", "工具链", "MCP 连接"])
+        self.nav.currentRowChanged.connect(self._show_page)
+        side_layout.addWidget(self.nav)
+        side_layout.addStretch()
+        foot = QLabel("Windows · Linux\n桌面界面  /  CLI  /  MCP")
+        foot.setObjectName("muted")
+        side_layout.addWidget(foot)
+        shell.addWidget(sidebar)
+        main = QWidget()
+        ml = QVBoxLayout(main)
+        ml.setContentsMargins(28, 22, 28, 18)
+        header = QHBoxLayout()
+        titles = QVBoxLayout()
+        self.page_title = QLabel("工作台", objectName="title")
+        self.page_subtitle = QLabel("管理 ROM 工程，保留每次构建的输入、工作区和产物", objectName="muted")
+        titles.addWidget(self.page_title); titles.addWidget(self.page_subtitle)
+        header.addLayout(titles); header.addStretch()
+        header.addWidget(QLabel("当前工程"))
+        self.project_combo = QComboBox()
+        self.project_combo.setMinimumWidth(190)
+        self.project_combo.currentTextChanged.connect(self._project_changed)
+        header.addWidget(self.project_combo)
+        ml.addLayout(header)
+        self.pages = QStackedWidget()
+        ml.addWidget(self.pages, 1)
+        self.status = QLabel("就绪", objectName="muted")
+        ml.addWidget(self.status)
+        shell.addWidget(main, 1)
+        self._workspace_page(); self._images_page(); self._runtime_page(); self._mcp_page()
+        self.nav.setCurrentRow(0)
+
+    def _card(self, title, subtitle=""):
+        box = QGroupBox(title, objectName="card")
+        lay = QVBoxLayout(box)
+        if subtitle:
+            label = QLabel(subtitle, objectName="muted")
+            lay.addWidget(label)
+        return box, lay
+
+    def _table(self, headers, select=QTableWidget.ExtendedSelection):
+        table = QTableWidget(0, len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(select)
+        table.setAlternatingRowColors(True)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        table.verticalHeader().setVisible(False)
+        return table
+
+    def _workspace_page(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        stats = QHBoxLayout(); self.stat_labels = []
+        for title, detail in (("工程", "INPUT / WORKSPACE / OUT"), ("输入文件", "原始镜像与 ROM 文件"), ("产物", "已完成的输出文件")):
+            box, bl = self._card(title, detail); value = QLabel("0"); value.setStyleSheet("font-size: 24pt; font-weight: 700; color:#376fd1;")
+            bl.addWidget(value); stats.addWidget(box); self.stat_labels.append(value)
+        layout.addLayout(stats)
+        splitter = QSplitter(Qt.Horizontal)
+        box, bl = self._card("工程列表", "双击工程进入镜像处理")
+        self.project_table = self._table(["工程", "状态", "输入", "产物"], QTableWidget.SingleSelection)
+        self.project_table.itemSelectionChanged.connect(self._select_project)
+        self.project_table.cellDoubleClicked.connect(lambda *_: self.nav.setCurrentRow(1))
+        bl.addWidget(self.project_table)
+        row = QHBoxLayout(); b = self._button("刷新", self.refresh); row.addWidget(b); row.addStretch(); row.addWidget(self._button("打开工程目录", self._open_project)); bl.addLayout(row)
+        splitter.addWidget(box)
+        box2, bl2 = self._card("新建工程", "独立目录便于保留原始输入和每次构建的工作现场")
+        self.new_name = QLineEdit(); self.new_name.setPlaceholderText("例如 DNA_MAYFLY_ORIGIN")
+        bl2.addWidget(QLabel("工程名称", objectName="muted")); bl2.addWidget(self.new_name); bl2.addWidget(self._button("创建工程", self._create_project, True)); bl2.addSpacing(12)
+        bl2.addWidget(QLabel("快速开始\n01 创建或选择工程\n02 导入镜像文件\n03 提取后编辑工作区\n04 回包并检查产物", objectName="muted")); bl2.addStretch()
+        splitter.addWidget(box2); splitter.setSizes([700, 300]); layout.addWidget(splitter, 1)
+        self.pages.addWidget(page)
+
+    def _images_page(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        box, bl = self._card("镜像与分区", "Payload / super 提取到 OUT；文件系统镜像提取到 WORKSPACE")
+        top = QHBoxLayout(); top.addWidget(self._button("导入文件", self._import_files, True)); top.addWidget(self._button("导入 ROM ZIP", self._import_archive)); top.addWidget(self._button("刷新", self.refresh_inputs)); top.addStretch(); top.addWidget(self._button("打开输出", lambda: self._open_project("OUT"))); bl.addLayout(top)
+        tabs = QTabWidget(); bl.addWidget(tabs, 1)
+        input_tab = QWidget(); il = QVBoxLayout(input_tab)
+        self.input_table = self._table(["文件", "格式", "大小"]); il.addWidget(self.input_table)
+        row = QHBoxLayout(); row.addWidget(self._button("提取所选", self._extract, True)); self.deep = QCheckBox("继续解包 Payload / super 中的 IMG"); self.deep.setChecked(True); row.addWidget(self.deep); row.addWidget(self._button("转为 Sparse", lambda: self._convert("sparse"))); row.addWidget(self._button("转为 RAW", lambda: self._convert("raw"))); il.addLayout(row)
+        fmt = QHBoxLayout(); fmt.addWidget(QLabel("按类型解包", objectName="muted"))
+        for label, value in (("解包 IMG", "img"), ("解包 Payload", "payload"), ("解包 DAT", "dat"), ("解包 DAT.BR", "dat.br"), ("解包 WIN", "win"), ("解包 super", "super")):
+            fmt.addWidget(self._button(label, lambda checked=False, v=value: self._extract_format(v)))
+        fmt.addStretch(); il.addLayout(fmt); tabs.addTab(input_tab, "输入文件")
+        part_tab = QWidget(); pl = QVBoxLayout(part_tab)
+        self.partition_table = self._table(["分区", "原文件系统"]); pl.addWidget(self.partition_table)
+        row = QHBoxLayout(); row.addWidget(self._button("回包所选分区", self._repack, True)); row.addWidget(self._button("打开工作区", lambda: self._open_project("WORKSPACE"))); row.addStretch(); row.addWidget(QLabel("回包格式")); self.repack_target = QComboBox(); self.repack_target.addItems(["IMG", "DAT", "DAT.BR"]); row.addWidget(self.repack_target); self.sparse = QCheckBox("输出 Sparse"); row.addWidget(self.sparse); pl.addLayout(row); tabs.addTab(part_tab, "工作区分区")
+        super_tab = QWidget(); sl = QVBoxLayout(super_tab)
+        self.super_table = self._table(["镜像", "来源", "大小"]); sl.addWidget(self.super_table)
+        row = QHBoxLayout(); row.addWidget(self._button("合成 super.img", self._repack_super, True)); row.addStretch(); row.addWidget(QLabel("类型")); self.super_type = QComboBox(); self.super_type.addItems(["A-only", "A/B", "Virtual A/B"]); row.addWidget(self.super_type); self.super_sparse = QCheckBox("Sparse 输出"); row.addWidget(self.super_sparse); sl.addLayout(row); tabs.addTab(super_tab, "合成 super")
+        layout.addWidget(box, 1)
+        logbox, ll = self._card("任务日志"); prog = QHBoxLayout(); self.progress = QProgressBar(); self.progress.setRange(0, 0); self.progress.hide(); prog.addWidget(self.progress, 1); self.cancel_btn = self._button("取消", self._cancel); self.cancel_btn.setEnabled(False); prog.addWidget(self.cancel_btn); ll.addLayout(prog); self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(20000); self.log.setMinimumHeight(130); ll.addWidget(self.log); layout.addWidget(logbox)
+        self.pages.addWidget(page)
+
+    def _runtime_page(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        box, bl = self._card("界面外观", "Qt 使用系统级窗口合成；浅色主题为默认")
+        row = QHBoxLayout(); row.addWidget(QLabel("主题")); self.theme = QComboBox(); self.theme.addItems(["浅色", "深色"]); row.addWidget(self.theme); row.addStretch(); bl.addLayout(row); layout.addWidget(box)
+        box, bl = self._card("运行后端", "Windows 原生无需 WSL；缺失工具可自动补齐")
+        row = QHBoxLayout(); self.backend = QComboBox(); self.backend.addItems(["native", "wsl"]); self.tool_dir = QLineEdit(); row.addWidget(self.backend); row.addWidget(self.tool_dir, 1); row.addWidget(self._button("浏览", self._browse_tools)); row.addWidget(self._button("保存配置", self._save_tools, True)); bl.addLayout(row); self.backend_label = QLabel(objectName="muted"); bl.addWidget(self.backend_label); bl.addWidget(self._button("自动补齐 Windows 工具", self._bootstrap_tools)); layout.addWidget(box)
+        box, bl = self._card("功能可用性", "可用状态依据工具文件检测；实际命令执行结果以任务日志为准")
+        self.capability_table = self._table(["功能", "状态", "工具"]); bl.addWidget(self.capability_table); layout.addWidget(box, 1); self.pages.addWidget(page)
+
+    def _mcp_page(self):
+        page = QWidget(); layout = QVBoxLayout(page); box, bl = self._card("连接你的 AI 客户端", "复制配置到支持 MCP stdio 的客户端")
+        command = [sys.executable, "--mcp", "--root", str(self.controller.root)] if getattr(sys, "frozen", False) else [sys.executable, str(ROOT / "Scripts" / "main.py"), "--mcp", "--root", str(self.controller.root)]
+        self.mcp_config = json.dumps({"mcpServers": {"art": {"command": command[0], "args": command[1:]}}}, ensure_ascii=False, indent=2)
+        edit = QPlainTextEdit(self.mcp_config); edit.setReadOnly(True); bl.addWidget(edit); bl.addWidget(self._button("复制连接配置", lambda: self._copy_config(edit), True)); bl.addWidget(QLabel("可调用工具\n工程创建 / 列表 · 输入识别 / 导入\n镜像提取 · 分区回包 · RAW / Sparse 转换\n工具链诊断 · 工作区分区列表", objectName="muted")); layout.addWidget(box, 1); self.pages.addWidget(page)
+
+    def _button(self, text, slot, primary=False):
+        b = QPushButton(text); b.setObjectName("primary" if primary else "secondary"); b.clicked.connect(slot); return b
+
+    def _show_page(self, index):
+        if index < 0: return
+        self.current_page = index; self.pages.setCurrentIndex(index)
+        titles = [("工作台", "管理 ROM 工程，保留每次构建的输入、工作区和产物"), ("镜像处理", "按原文件系统解包与回包，任务日志实时可见"), ("工具链", "检测依赖并配置 Windows 原生工具或 WSL"), ("MCP 连接", "让支持 MCP 的客户端调用同一套工程与镜像操作")]
+        self.page_title.setText(titles[index][0]); self.page_subtitle.setText(titles[index][1])
+        if index == 1: self.refresh_inputs()
+
+    def _project_changed(self, _):
+        self.refresh_inputs()
+
+    def refresh(self):
+        try: self.projects = self.controller.list_projects()
+        except Exception as e: self.status.setText(str(e)); return
+        self.project_table.setRowCount(0)
+        for item in self.projects:
+            row = self.project_table.rowCount(); self.project_table.insertRow(row)
+            for col, value in enumerate((item["name"], STATE_NAMES.get(item["state"], item["state"]), item["input_count"], item["output_count"])): self.project_table.setItem(row, col, QTableWidgetItem(str(value)))
+        names = [p["name"] for p in self.projects if p["state"] == "new"]
+        self.project_combo.blockSignals(True); self.project_combo.clear(); self.project_combo.addItems(names); self.project_combo.blockSignals(False)
+        if names: self.project_combo.setCurrentIndex(0)
+        for label, value in zip(self.stat_labels, (len(self.projects), sum(p["input_count"] for p in self.projects), sum(p["output_count"] for p in self.projects))): label.setText(str(value))
+        self.refresh_inputs(); self.refresh_runtime()
+
+    def refresh_inputs(self):
+        for table in (self.input_table, self.partition_table, self.super_table): table.setRowCount(0)
+        self.inputs = {}; self.partitions = {}
+        project = self.project_combo.currentText()
+        if not project: return
+        try:
+            for i, item in enumerate(self.controller.list_inputs(project)):
+                self.inputs[str(i)] = item; row = self.input_table.rowCount(); self.input_table.insertRow(row)
+                for col, value in enumerate((item["name"], FORMAT_NAMES.get(item["format"], item["format"]), size_text(item["size"]))): self.input_table.setItem(row, col, QTableWidgetItem(str(value)))
+                if item["name"].lower().endswith(".img"): self._add_super(item["name"], "INPUT", item["size"])
+            for item in self.controller.list_partitions(project):
+                self.partitions[item["name"]] = item; row = self.partition_table.rowCount(); self.partition_table.insertRow(row); self.partition_table.setItem(row, 0, QTableWidgetItem(item["name"])); self.partition_table.setItem(row, 1, QTableWidgetItem(FORMAT_NAMES.get(item["format"], item["format"])))
+            for item in self.controller.list_outputs(project):
+                if item["name"].lower().endswith(".img"): self._add_super(item["name"], "OUT", item["size"])
+        except Exception as e: self.status.setText(str(e))
+
+    def _add_super(self, name, source, size):
+        row = self.super_table.rowCount(); self.super_table.insertRow(row)
+        for col, value in enumerate((name, source, size_text(size))): self.super_table.setItem(row, col, QTableWidgetItem(str(value)))
+
+    def refresh_runtime(self):
+        try: status = self.controller.toolchain_status()
+        except Exception as e: self.backend_label.setText(str(e)); return
+        self.backend.setCurrentText("wsl" if status["mode"] == "wsl" else "native")
+        config = self.controller.root / "art-res" / "host-tools.local.json"; local = json.loads(config.read_text(encoding="utf-8")) if config.is_file() else {}
+        self.tool_dir.setText(os.environ.get("ART_WINDOWS_TOOLS") or local.get("windows_tools", "")); self.backend_label.setText(f"{status['label']}  ·  {len(status['tools']) - len(status['missing'])}/{len(status['tools'])} 个外部工具已找到")
+        self.capability_table.setRowCount(0)
+        for name, ready in status["capabilities"].items():
+            row = self.capability_table.rowCount(); self.capability_table.insertRow(row); values = (name, "可用" if ready else "缺少工具", " / ".join(CAPABILITIES[name]) or "内置 Python 实现")
+            for col, value in enumerate(values): self.capability_table.setItem(row, col, QTableWidgetItem(value))
+
+    def _require_project(self):
+        project = self.project_combo.currentText()
+        if not project: QMessageBox.information(self, "选择工程", "请先创建或选择工程。"); return None
+        return project
+
+    def _create_project(self):
+        try: self.controller.create_project(self.new_name.text()); self.new_name.clear(); self.refresh()
+        except Exception as e: QMessageBox.critical(self, "创建工程失败", str(e))
+
+    def _select_project(self):
+        row = self.project_table.currentRow()
+        if row >= 0: self.project_combo.setCurrentText(self.project_table.item(row, 0).text())
+
+    def _import_files(self):
+        project = self._require_project(); paths, _ = QFileDialog.getOpenFileNames(self, "导入镜像及 transfer.list")
+        if project and paths: self._thread_call(lambda: self.controller.import_inputs(project, paths), "正在导入文件…")
+
+    def _import_archive(self):
+        project = self._require_project(); path, _ = QFileDialog.getOpenFileName(self, "选择 ROM ZIP", filter="ROM ZIP (*.zip);;所有文件 (*.*)")
+        if project and path: self._thread_call(lambda: self.controller.import_rom_archive(project, path), "正在导入 ROM ZIP…")
+
+    def _selected_inputs(self):
+        return [self.inputs[str(i.row())]["path"] for i in self.input_table.selectionModel().selectedRows() if str(i.row()) in self.inputs]
+
+    def _extract(self):
+        project = self._require_project(); paths = self._selected_inputs()
+        if project and paths: self._start("extract", project=project, sources=paths, deep=self.deep.isChecked())
+
+    def _extract_format(self, requested):
+        project = self._require_project(); maps = {"img": {"ext", "erofs", "sparse", "boot", "vendor_boot"}, "payload": {"payload"}, "dat": {"dat"}, "dat.br": {"dat.br"}, "win": {"win"}, "super": {"super"}}
+        selected = [self.inputs[str(i.row())] for i in self.input_table.selectionModel().selectedRows() if str(i.row()) in self.inputs]; matches = [x for x in selected if x["format"] in maps[requested]] or [x for x in self.inputs.values() if x["format"] in maps[requested]]
+        if project and matches: self._start("extract", project=project, sources=[x["path"] for x in matches], deep=self.deep.isChecked())
+
+    def _convert(self, target):
+        project = self._require_project(); paths = self._selected_inputs()
+        if project and len(paths) == 1: self._start("convert", project=project, source=paths[0], target=target)
+
+    def _repack(self):
+        project = self._require_project(); rows = self.partition_table.selectionModel().selectedRows(); selection = [self.partition_table.item(i.row(), 0).text() for i in rows]
+        if not project or not selection: return
+        options = self._repack_options(len(selection))
+        if options is None: return
+        params = {"project": project, "sparse": options.pop("sparse"), "target": {"IMG": "img", "DAT": "dat", "DAT.BR": "dat.br"}[self.repack_target.currentText()], **options}
+        operation = "repack" if len(selection) == 1 else "repack_batch"; params["partition" if operation == "repack" else "partitions"] = selection; self._start(operation, **params)
+
+    def _repack_options(self, count):
+        dialog = QDialog(self); dialog.setWindowTitle("回包参数"); form = QFormLayout(dialog); fs = QComboBox(); fs.addItems(["自动（按原始文件系统）", "EXT4", "EROFS"]); size = QComboBox(); size.addItems(["保留原始尺寸", "自动估算", "自定义 MiB"]); custom = QLineEdit(); comp = QComboBox(); comp.addItems(["lz4hc", "lz4", "zstd", "lzma"]); level = QSpinBox(); level.setRange(1, 12); level.setValue(9); sparse = QCheckBox("输出 Android Sparse 镜像"); form.addRow(QLabel(f"已选择 {count} 个分区")); form.addRow("文件系统", fs); form.addRow("镜像大小", size); form.addRow("自定义 MiB", custom); form.addRow("EROFS 压缩", comp); form.addRow("压缩等级", level); form.addRow(sparse); buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
+        if dialog.exec() != QDialog.Accepted: return None
+        mode = {"自动（按原始文件系统）": "auto", "EXT4": "ext", "EROFS": "erofs"}[fs.currentText()]; image_size = "original" if size.currentText() == "保留原始尺寸" else "auto"
+        if size.currentText() == "自定义 MiB":
+            try: image_size = str(max(1, int(float(custom.text()))))
+            except ValueError: QMessageBox.warning(self, "参数错误", "自定义镜像大小必须是 MiB 数字。"); return None
+        return {"filesystem": mode, "image_size": image_size, "erofs_compressor": comp.currentText(), "erofs_level": level.value(), "sparse": sparse.isChecked()}
+
+    def _repack_super(self):
+        project = self._require_project(); rows = self.super_table.selectionModel().selectedRows(); sources = []
+        for i in rows:
+            name = self.super_table.item(i.row(), 0).text(); source = self.super_table.item(i.row(), 1).text(); sources.append(str(self.controller.root / project / source / name))
+        if project and sources: self._start("repack_super", project=project, sources=sources, super_type={"A-only": 0, "A/B": 1, "Virtual A/B": 2}[self.super_type.currentText()], sparse=self.super_sparse.isChecked())
+
+    def _thread_call(self, fn, message):
+        self._busy(True); self.status.setText(message)
+        def run():
+            try: self.events.put({"event": "result", "data": {"outputs": fn()}})
+            except Exception as e: self.events.put({"event": "error", "message": str(e)})
+            self.events.put({"event": "finished"})
+        threading.Thread(target=run, daemon=True).start()
+
+    def _start(self, operation, **params):
+        if self.process is not None: return
+        try: self.process = self.controller.start_job(self.controller.job_request(operation, **params))
+        except Exception as e: QMessageBox.critical(self, "无法启动任务", str(e)); return
+        self.cancelled = False; self._busy(True); self.status.setText("任务运行中…"); self._log(f"开始任务：{operation}  ·  {params.get('project', '')}")
+        process = self.process
+        def read():
+            for line in process.stdout:
+                try: self.events.put(json.loads(line))
+                except ValueError: self.events.put({"event": "log", "message": line.strip()})
+            process.wait(); self.events.put({"event": "finished", "code": process.returncode})
+        threading.Thread(target=read, daemon=True).start()
+
+    def _busy(self, busy):
+        self.cancel_btn.setEnabled(busy and self.process is not None); self.progress.setVisible(busy)
+
+    def _poll(self):
+        for _ in range(120):
+            try: event = self.events.get_nowait()
+            except queue.Empty: break
+            kind = event.get("event")
+            if kind == "log": self._log(event.get("message", ""))
+            elif kind == "progress": self.status.setText(event.get("message", "任务运行中…"))
+            elif kind == "error": self._log("失败：" + event.get("message", "")); self.status.setText("任务失败 · 详情见日志")
+            elif kind == "result":
+                outputs = event.get("data", {}).get("outputs", []); self._log_many(["输出：" + str(x) for x in outputs]); self.status.setText(f"任务完成 · {len(outputs)} 个产物")
+            elif kind == "toolchain": self._log_many(["已下载工具：" + x for x in event.get("data", {}).get("downloaded", [])]); self.refresh_runtime()
+            elif kind == "finished": self.process = None; self._busy(False); self.refresh()
+
+    def _log(self, text): self._log_many([text])
+    def _log_many(self, lines):
+        clean = [ANSI.sub("", str(x)) for x in lines if x is not None]
+        if clean: self.log.appendPlainText("\n".join(clean))
+
+    def _cancel(self):
+        if self.process and self.process.poll() is None:
+            self.cancelled = True
+            if os.name == "nt": subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **process_options())
+            else: self.process.terminate()
+
+    def _open_project(self, folder=""):
+        project = self._require_project()
+        if not project: return
+        path = self.controller.root / project / folder
+        if os.name == "nt": os.startfile(path)
+        elif sys.platform == "darwin": subprocess.Popen(["open", str(path)])
+        else: subprocess.Popen(["xdg-open", str(path)])
+
+    def _browse_tools(self):
+        path = QFileDialog.getExistingDirectory(self, "选择 Windows 原生工具目录")
+        if path: self.tool_dir.setText(path)
+
+    def _save_tools(self):
+        try: self.controller.configure_tools(self.tool_dir.text(), self.backend.currentText()); self.refresh_runtime(); self.status.setText("工具链配置已保存")
+        except Exception as e: QMessageBox.critical(self, "配置失败", str(e))
+
+    def _bootstrap_tools(self):
+        self._thread_call(lambda: self.controller.bootstrap_tools(), "正在检查并下载缺失的 Windows 工具…")
+
+    def _copy_config(self, edit): QApplication.clipboard().setText(edit.toPlainText()); self.status.setText("MCP 连接配置已复制")
+
+    def closeEvent(self, event):
+        if self.process and self.process.poll() is None: self._cancel()
+        event.accept()
+
+
+def launch(root=None):
+    # Ask Qt to use the Windows desktop OpenGL backend where available.  Qt's
+    # backing store still falls back safely on machines without a usable GPU,
+    # while normal Windows installs get DWM-composited resize/redraw.
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL)
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setApplicationName("Android ROM Toolkit for Windows")
+    window = ArtWindow(ArtController(root or ROOT)); window.show(); return app.exec()
+
+
+if __name__ == "__main__": launch()
