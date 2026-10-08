@@ -137,9 +137,35 @@ class ArtApp(Window):
         self.bind("<Configure>", self._on_configure)
         self._build_ui()
         self._background.configure(bg=PALETTE["bg"])
+        self._prepare_windows_rendering()
         self.update_idletasks()
         self.deiconify()
         self.after(80, self._poll)
+
+    def _prepare_windows_rendering(self):
+        """Set a real native erase brush so resize never exposes black pixels."""
+        if os.name != "nt":
+            return
+        try:
+            hwnd = self.winfo_id()
+            user32 = ctypes.windll.user32
+            gdi32 = ctypes.windll.gdi32
+            get_long = user32.GetWindowLongPtrW
+            set_long = user32.SetWindowLongPtrW
+            get_long.restype = ctypes.c_ssize_t
+            set_long.restype = ctypes.c_ssize_t
+            style = get_long(hwnd, -16)
+            set_long(hwnd, -16, style | 0x02000000 | 0x04000000)  # CLIPCHILDREN | CLIPSIBLINGS
+            color = PALETTE["bg"].lstrip("#")
+            red, green, blue = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+            brush = gdi32.CreateSolidBrush(red | (green << 8) | (blue << 16))
+            if brush:
+                set_class_long = user32.SetClassLongPtrW
+                set_class_long(hwnd, -10, brush)  # GCLP_HBRBACKGROUND
+                self._background_brush = brush
+            user32.UpdateWindow(hwnd)
+        except (AttributeError, OSError, tk.TclError):
+            pass
 
     def _settings_path(self):
         path = self.controller.root / "art-res" / "ui-settings.json"
@@ -857,7 +883,7 @@ class ArtApp(Window):
             self.progress.stop()
         if self._resize_after is not None:
             self.after_cancel(self._resize_after)
-        self._resize_after = self.after(140, self._finish_resize)
+        self._resize_after = self.after(180, self._finish_resize)
 
     def _finish_resize(self):
         self._resize_after = None
@@ -867,6 +893,11 @@ class ArtApp(Window):
             self._deferred_logs.clear()
         if self.process is not None and not self.cancelled:
             self.progress.start(12)
+        if os.name == "nt":
+            try:
+                ctypes.windll.user32.RedrawWindow(self.winfo_id(), None, None, 0x0001 | 0x0004 | 0x0080)
+            except (AttributeError, OSError, tk.TclError):
+                pass
 
 
     def _log(self, message):
