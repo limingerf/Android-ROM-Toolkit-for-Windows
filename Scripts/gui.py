@@ -57,7 +57,7 @@ class ArtApp(Window):
                 # Set before creating Tk so Windows assigns the same identity
                 # to the EXE, title bar, and taskbar button.
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                    "limingerf.AndroidROMToolkit.Windows"
+                    "limingerf.AndroidROMToolkit.Windows2"
                 )
             except (AttributeError, OSError):
                 pass
@@ -75,6 +75,7 @@ class ArtApp(Window):
         for icon_path in icon_paths:
             if icon_path.is_file():
                 try:
+                    self.iconbitmap(str(icon_path))
                     self.iconbitmap(default=str(icon_path))
                 except tk.TclError:
                     pass
@@ -95,15 +96,21 @@ class ArtApp(Window):
             try:
                 user32 = ctypes.windll.user32
                 user32.LoadImageW.restype = ctypes.c_void_p
-                hicon = user32.LoadImageW(None, str(native_icon_path), 1, 32, 32, 0x10)
-                if hicon:
-                    self._native_icon = hicon
-                    user32.SendMessageW(self.winfo_id(), 0x0080, 0, hicon)
-                    user32.SendMessageW(self.winfo_id(), 0x0080, 1, hicon)
+                small = user32.LoadImageW(None, str(native_icon_path), 1, 16, 16, 0x10)
+                large = user32.LoadImageW(None, str(native_icon_path), 1, 32, 32, 0x10)
+                if small or large:
+                    self._native_icons = (small, large)
+                    hwnd = self.winfo_id()
+                    user32.SendMessageW(hwnd, 0x0080, 0, small or large)
+                    user32.SendMessageW(hwnd, 0x0080, 1, large or small)
             except (AttributeError, OSError, tk.TclError):
                 pass
-        self.geometry("1200x820")
-        self.minsize(980, 720)
+        self.update_idletasks()
+        screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
+        width = min(1320, max(1080, screen_w - 120))
+        height = min(900, max(760, screen_h - 110))
+        self.geometry(f"{width}x{height}+{max(0, (screen_w - width) // 2)}+{max(0, (screen_h - height) // 2)}")
+        self.minsize(1040, 740)
         self.project_var = tk.StringVar()
         self.status_var = tk.StringVar(value="就绪")
         self.events = queue.Queue()
@@ -667,6 +674,11 @@ class ArtApp(Window):
         dialog.transient(self)
         dialog.resizable(False, False)
         dialog.configure(bg=PALETTE["panel"])
+        dialog.update_idletasks()
+        parent_x, parent_y = self.winfo_rootx(), self.winfo_rooty()
+        parent_w, parent_h = self.winfo_width(), self.winfo_height()
+        dialog_w, dialog_h = 540, 520
+        dialog.geometry(f"{dialog_w}x{dialog_h}+{max(0, parent_x + (parent_w - dialog_w) // 2)}+{max(0, parent_y + (parent_h - dialog_h) // 2)}")
         dialog.grab_set()
         result = {}
         pad = {"padx": 14, "pady": 7}
