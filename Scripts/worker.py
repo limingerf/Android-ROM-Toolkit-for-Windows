@@ -253,6 +253,12 @@ def _dispatch_extracted_images(stage, label):
         return
     for image in images:
         partition = partition_name(image)
+        # Super unpackers may leave the temporary unsparsed super image in
+        # OUT. It is already the container being processed; sending it back
+        # through extract_super re-enters the old interactive confirmation.
+        if partition == "super" or image.name.startswith(".super"):
+            image.unlink(missing_ok=True)
+            continue
         destination = stage.workspace_dir / partition
         _emit("progress", message=f"继续解包 {image.name}")
         if decompress_img(str(image), str(destination)):

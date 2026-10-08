@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from Scripts.Primary.Utils import V
@@ -119,7 +120,10 @@ def extract_super(working_source, partition):
         print(f'> super 分解失败: {error}')
         return False
 
-    if input('> 是否继续分解img [0/1]: ') != '1':
+    # GUI/MCP jobs run without an interactive stdin.  They already request
+    # deep extraction from the caller, so continue automatically instead of
+    # raising EOFError on input().  Keep the prompt for the legacy CLI.
+    if not getattr(V, 'JM', False) and sys.stdin.isatty() and input('> 是否继续分解img [0/1]: ') != '1':
         _cleanup_super_ab(super_dir)
         _move_super_images_to_out(super_dir)
         shutil.rmtree(super_dir, ignore_errors=True)
