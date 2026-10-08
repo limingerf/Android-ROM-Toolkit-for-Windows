@@ -315,6 +315,9 @@ def _repack(controller, layout, stage, params):
             check_image = Path(sparse_to_raw(passthrough, stage.workspace_dir / ".check.raw.img"))
         if V.toolchain.run(["e2fsck", "-fn", str(check_image)]) != 0:
             raise RuntimeError("原始 EXT4 文件系统检查未通过，未发布镜像")
+        if params.get("_defer_publish"):
+            return {"staged_artifacts": [str(passthrough)],
+                    "format": "img", "validation": "原镜像直通，保留 vendor/odm 原始几何结构；e2fsck -fn 通过"}
         return {"outputs": _publish([(passthrough, layout.out_dir / passthrough.name)]),
                 "format": "img", "validation": "原镜像直通，保留 vendor/odm 原始几何结构；e2fsck -fn 通过"}
     if fixed_geometry:
@@ -360,6 +363,9 @@ def _repack(controller, layout, stage, params):
         if V.toolchain.run(["e2fsck", "-fn", str(check_image)]) != 0:
             raise RuntimeError("EXT4 文件系统检查未通过")
         validation = "e2fsck -fn 通过；尚未进行设备启动验证"
+    if params.get("_defer_publish"):
+        return {"staged_artifacts": [str(path) for path in artifacts], "format": target,
+                "validation": validation}
     pairs = [(path, layout.out_dir / path.name) for path in artifacts]
     return {"outputs": _publish(pairs), "format": target,
             "validation": validation}
@@ -371,13 +377,23 @@ def _repack_batch(controller, layout, stage, params):
         raise ValueError("请选择至少一个工作区分区")
     outputs = []
     validations = []
+    collected = stage.workspace_dir / ".batch-repack-artifacts"
+    collected.mkdir()
     for index, partition in enumerate(partitions):
         _emit("progress", current=index, total=len(partitions), message=f"回包 {partition}")
-        result = _repack(controller, layout, stage, {**params, "partition": partition})
-        outputs.extend(result.get("outputs", []))
+        result = _repack(controller, layout, stage,
+                         {**params, "partition": partition, "_defer_publish": True})
+        for artifact_name in result.get("staged_artifacts", []):
+            artifact = Path(artifact_name)
+            destination = collected / artifact.name
+            if destination.exists():
+                raise FileExistsError(f"批量回包产生重名产物：{destination.name}")
+            os.replace(artifact, destination)
         if result.get("validation"):
             validations.append(f"{partition}: {result['validation']}")
     _emit("progress", current=len(partitions), total=len(partitions), message="批量回包完成")
+    artifacts = sorted(path for path in collected.iterdir() if path.is_file())
+    outputs = _publish([(path, layout.out_dir / path.name) for path in artifacts])
     return {"outputs": outputs, "format": params.get("target", "img"),
             "validation": "；".join(validations)}
 
