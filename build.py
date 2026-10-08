@@ -100,6 +100,7 @@ def main() -> None:
          '--distpath', str(DIST_DIR),
          '--workpath', str(BUILD_DIR),
          '--specpath', str(BUILD_DIR),
+         '--runtime-hook', str(ROOT / 'pyinstaller_hooks' / 'qt_icu_runtime.py'),
          '--exclude-module', 'numpy',
          '--hidden-import', 'Scripts.mcp_server',
          '--hidden-import', 'mcp.server.fastmcp',
