@@ -55,8 +55,14 @@ def _prepare(source, fsconfig, contexts, dumpinfo):
         if int(size) <= 1048576:
             size = 1048576
 
+    requested_bytes = V.SETUP_MANIFEST.get("REPACK_IMAGE_SIZE_BYTES")
     requested_size = V.SETUP_MANIFEST.get("REPACK_IMAGE_SIZE", "auto")
-    if str(requested_size).lower() not in {"", "auto", "automatic"}:
+    if requested_bytes:
+        try:
+            size = max(1048576, int(requested_bytes))
+        except (TypeError, ValueError):
+            pass
+    elif str(requested_size).lower() not in {"", "auto", "automatic"}:
         try:
             size = max(1048576, int(float(requested_size)) * 1024 * 1024)
         except (TypeError, ValueError):

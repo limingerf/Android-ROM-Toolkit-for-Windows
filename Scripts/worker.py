@@ -303,10 +303,12 @@ def _repack(controller, layout, stage, params):
     elif output_format == "erofs":
         original_format = "erofs"
     V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] = params.get("image_size", "auto")
+    V.SETUP_MANIFEST.pop("REPACK_IMAGE_SIZE_BYTES", None)
     if V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] == "original":
         original_source = _source_image(layout, partition)
         if original_source:
-            V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] = str(max(1, (original_source.stat().st_size + 1048575) // 1048576))
+            V.SETUP_MANIFEST["REPACK_IMAGE_SIZE_BYTES"] = str(original_source.stat().st_size)
+            V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] = "auto"
         else:
             V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] = "auto"
     if params.get("erofs_compressor"):
