@@ -70,9 +70,8 @@ class ArtApp(Window):
         # the native black erase background before pack/grid has finished.
         self.withdraw()
         self.configure(background=PALETTE["bg"])
-        self._background = tk.Frame(self, bg=PALETTE["bg"], bd=0, highlightthickness=0)
-        self._background.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self._background.lower()
+        self._content = tk.Frame(self, bg=PALETTE["bg"], bd=0, highlightthickness=0)
+        self._content.pack(fill="both", expand=True)
         self.title("Android ROM Toolkit for Windows")
         resource_root = Path(getattr(sys, "_MEIPASS", ROOT))
         icon_paths = (resource_root / "assets" / "android-rom-toolkit.ico",
@@ -130,40 +129,23 @@ class ArtApp(Window):
         self._deferred_logs = []
         self._resize_after = None
         self._resizing = False
+        self._resize_frozen = False
         self.pages = {}
         self.nav = {}
         self.current_page = "workspace"
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Configure>", self._on_configure)
         self._build_ui()
-        self._background.configure(bg=PALETTE["bg"])
-        self._prepare_windows_rendering()
         self.update_idletasks()
         self.deiconify()
         self.after(80, self._poll)
 
-    def _prepare_windows_rendering(self):
-        """Set a real native erase brush so resize never exposes black pixels."""
+    def _freeze_resize_paint(self, frozen):
         if os.name != "nt":
             return
         try:
-            hwnd = self.winfo_id()
-            user32 = ctypes.windll.user32
-            gdi32 = ctypes.windll.gdi32
-            get_long = user32.GetWindowLongPtrW
-            set_long = user32.SetWindowLongPtrW
-            get_long.restype = ctypes.c_ssize_t
-            set_long.restype = ctypes.c_ssize_t
-            style = get_long(hwnd, -16)
-            set_long(hwnd, -16, style | 0x02000000 | 0x04000000)  # CLIPCHILDREN | CLIPSIBLINGS
-            color = PALETTE["bg"].lstrip("#")
-            red, green, blue = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
-            brush = gdi32.CreateSolidBrush(red | (green << 8) | (blue << 16))
-            if brush:
-                set_class_long = user32.SetClassLongPtrW
-                set_class_long(hwnd, -10, brush)  # GCLP_HBRBACKGROUND
-                self._background_brush = brush
-            user32.UpdateWindow(hwnd)
+            ctypes.windll.user32.SendMessageW(self.winfo_id(), 0x000B, 0 if frozen else 1, 0)
+            self._resize_frozen = frozen
         except (AttributeError, OSError, tk.TclError):
             pass
 
@@ -191,8 +173,8 @@ class ArtApp(Window):
         PALETTE.clear()
         PALETTE.update(THEME_PALETTES[self.ui_theme])
         self.configure(bg=PALETTE["bg"])
-        if hasattr(self, "_background"):
-            self._background.configure(bg=PALETTE["bg"])
+        if hasattr(self, "_content"):
+            self._content.configure(bg=PALETTE["bg"])
         if tb:
             self.style.theme_use("flatly" if self.ui_theme == "light" else "darkly")
 
@@ -261,7 +243,7 @@ class ArtApp(Window):
         return frame
 
     def _shell(self):
-        side = self.frame(self, PALETTE["sidebar"], width=210, padx=18, pady=26)
+        side = self.frame(self._content, PALETTE["sidebar"], width=210, padx=18, pady=26)
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
         brand = self.frame(side, PALETTE["sidebar"])
@@ -284,7 +266,7 @@ class ArtApp(Window):
         self.label(footer, "Windows · Linux", size=9, color=PALETTE["muted"]).pack(anchor="w")
         self.label(footer, "桌面界面  /  CLI  /  MCP", size=8, color=PALETTE["muted"]).pack(anchor="w", pady=(6, 0))
 
-        main = self.frame(self)
+        main = self.frame(self._content)
         main.pack(side="right", fill="both", expand=True, padx=26, pady=22)
         header = self.frame(main)
         header.pack(fill="x", pady=(0, 22))
@@ -602,6 +584,8 @@ class ArtApp(Window):
         # the new palette as well as ttkbootstrap's native widgets.
         for child in self.winfo_children():
             child.destroy()
+        self._content = tk.Frame(self, bg=PALETTE["bg"], bd=0, highlightthickness=0)
+        self._content.pack(fill="both", expand=True)
         self.pages = {}
         self.nav = {}
         self.action_buttons = []
@@ -879,6 +863,8 @@ class ArtApp(Window):
         if event.widget is not self:
             return
         self._resizing = True
+        if not self._resize_frozen:
+            self._freeze_resize_paint(True)
         if self.process is not None:
             self.progress.stop()
         if self._resize_after is not None:
@@ -888,6 +874,8 @@ class ArtApp(Window):
     def _finish_resize(self):
         self._resize_after = None
         self._resizing = False
+        if self._resize_frozen:
+            self._freeze_resize_paint(False)
         if self._deferred_logs:
             self._log_many(self._deferred_logs[:])
             self._deferred_logs.clear()
