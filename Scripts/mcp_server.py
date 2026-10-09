@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from Scripts.application import ArtController
+from Scripts.version import APP_VERSION
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -92,7 +93,7 @@ class McpServer:
         if method.startswith("notifications/"):
             return None
         if method == "initialize":
-            result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "art-rom-toolkit", "version": "2.0.0"}}
+            result = {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "art-rom-toolkit", "version": APP_VERSION}}
         elif method == "ping":
             result = {}
         elif method == "tools/list":
