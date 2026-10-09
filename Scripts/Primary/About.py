@@ -18,14 +18,14 @@ def show():
 {'=' * 50}{CLOSE}
 
 {YELLOW}项目链接:{CLOSE}
-  GitHub: https://github.com/ELF-RC/A.R.T
-  原项目: https://github.com/ColdWindScholar/D.N.A3/
+  Windows版本: https://github.com/limingerf/Android-ROM-Toolkit-for-Windows
+  原项目: https://github.com/ELF-RC/A.R.T
 
-{YELLOW}原工具开发者:{CLOSE}
-  ColdWindScholar (3590361911@qq.com)
+{YELLOW}原项目开发者:{CLOSE}
+  ELF-RC
 
-{YELLOW}工具开发者:{CLOSE}
-  ELF-RC (3580977309@qq.com)
+{YELLOW}Windows版本维护:{CLOSE}
+  limingerf
 
 {YELLOW}二进制文件开发者:{CLOSE}
   AOSP (Apache-2.0)        - make_ext4fs, img2simg, lpmake

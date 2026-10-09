@@ -1,9 +1,7 @@
 """Qt desktop interface for Android ROM Toolkit.
 
-The old interface was built from Tk widgets.  This module keeps the same
-controller and worker protocol while using Qt's native window/backing-store
-pipeline, which avoids the black repaint artefacts and resize stalls seen on
-some Windows DWM configurations.
+The workbench uses Qt's native window/backing-store pipeline and keeps the
+controller and worker protocol in one desktop frontend.
 """
 from __future__ import annotations
 
@@ -337,7 +335,7 @@ class ArtWindow(QMainWindow):
 
     def _apply_style(self):
         # Fusion uses Qt's cross-platform controls and lets DWM composite one
-        # backing store instead of hundreds of Tk child windows.
+        # backing store instead of hundreds of child windows.
         QApplication.instance().setStyle("Fusion")
         sheet = """
             * { font-family: 'Microsoft YaHei UI'; font-size: 10pt; }
@@ -545,6 +543,50 @@ class ArtWindow(QMainWindow):
         table.verticalHeader().setVisible(False)
         return table
 
+    def _selection_bar(self, table, label):
+        """Create a shared select-all and selection-count row."""
+        row = QHBoxLayout(); row.setSpacing(8)
+        toggle = QCheckBox("全选")
+        count = QLabel(objectName="muted")
+        toggle.toggled.connect(lambda checked, target=table: self._set_table_selection(target, checked))
+        table.itemSelectionChanged.connect(lambda target=table, box=toggle, text=count, name=label: self._update_table_selection(target, box, text, name))
+        # Row insertion/removal does not consistently emit itemSelectionChanged
+        # on every Qt platform.  Keep the counter correct while a project is
+        # refreshed, even when the current selection is empty.
+        model = table.model()
+        refresh_count = lambda *args, target=table, box=toggle, text=count, name=label: self._update_table_selection(target, box, text, name)
+        model.rowsInserted.connect(refresh_count)
+        model.rowsRemoved.connect(refresh_count)
+        model.modelReset.connect(refresh_count)
+        row.addWidget(toggle); row.addWidget(count); row.addStretch()
+        self._update_table_selection(table, toggle, count, label)
+        return row
+
+    @staticmethod
+    def _set_table_selection(table, checked):
+        table.blockSignals(True)
+        table.clearSelection()
+        if checked and table.rowCount():
+            table.selectAll()
+        table.blockSignals(False)
+        table.itemSelectionChanged.emit()
+
+    @staticmethod
+    def _update_table_selection(table, toggle, count, label):
+        # Qt can deliver a queued model signal while the parent window is
+        # being torn down.  In that short interval the Python wrapper still
+        # exists but its C++ table has already been deleted.
+        try:
+            selection_model = table.selectionModel()
+            selected = len(selection_model.selectedRows()) if selection_model else 0
+            total = table.rowCount()
+        except RuntimeError:
+            return
+        toggle.blockSignals(True)
+        toggle.setChecked(total > 0 and selected == total)
+        toggle.blockSignals(False)
+        count.setText(f"已选 {selected}/{total}")
+
     def _workspace_page(self):
         page = QWidget(); layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 12, 18); layout.setSpacing(16)
@@ -577,14 +619,14 @@ class ArtWindow(QMainWindow):
         bl.addLayout(top)
         tabs = QTabWidget(); tabs.setMinimumHeight(500); bl.addWidget(tabs, 1)
         input_tab = QWidget(); il = QVBoxLayout(input_tab); il.setContentsMargins(8, 8, 8, 8); il.setSpacing(12)
-        self.input_table = self._table(["文件", "格式", "大小"]); self.input_table.setMinimumHeight(240); il.addWidget(self.input_table, 1)
+        self.input_table = self._table(["文件", "格式", "大小"]); self.input_table.setMinimumHeight(240); il.addWidget(self.input_table, 1); il.addLayout(self._selection_bar(self.input_table, "输入文件"))
         action_row = QHBoxLayout(); action_row.setSpacing(8); action_row.addWidget(self._button("提取所选", self._extract, True)); self.deep = QCheckBox("Payload / super 继续解包内部 IMG"); self.deep.setChecked(True); action_row.addWidget(self.deep); action_row.addStretch(); action_row.addWidget(self._button("转为 Sparse", lambda: self._convert("sparse"))); action_row.addWidget(self._button("转为 RAW", lambda: self._convert("raw"))); il.addLayout(action_row)
         format_row = QHBoxLayout(); format_row.setSpacing(8); format_row.addWidget(QLabel("批量解包类型", objectName="muted")); self.extract_type = QComboBox(); self.extract_type.addItem("IMG / Sparse / Boot", "img"); self.extract_type.addItem("Payload.bin", "payload"); self.extract_type.addItem("new.dat", "dat"); self.extract_type.addItem("new.dat.br", "dat.br"); self.extract_type.addItem("WIN 分片", "win"); self.extract_type.addItem("super.img", "super"); format_row.addWidget(self.extract_type, 1); format_row.addWidget(self._button("按类型提取", self._extract_selected_type, True)); il.addLayout(format_row); tabs.addTab(input_tab, "输入文件")
         part_tab = QWidget(); pl = QVBoxLayout(part_tab); pl.setContentsMargins(8, 8, 8, 8); pl.setSpacing(12)
-        self.partition_table = self._table(["分区", "原文件系统"]); self.partition_table.setMinimumHeight(300); pl.addWidget(self.partition_table, 1)
+        self.partition_table = self._table(["分区", "原文件系统"]); self.partition_table.setMinimumHeight(300); pl.addWidget(self.partition_table, 1); pl.addLayout(self._selection_bar(self.partition_table, "工作区分区"))
         row = QHBoxLayout(); row.setSpacing(8); row.addWidget(self._button("回包所选分区", self._repack, True)); row.addWidget(self._button("打开工作区", lambda: self._open_project("WORKSPACE"))); row.addStretch(); row.addWidget(QLabel("回包格式")); self.repack_target = QComboBox(); self.repack_target.addItems(["IMG", "DAT", "DAT.BR"]); row.addWidget(self.repack_target); self.sparse = QCheckBox("输出 Sparse"); row.addWidget(self.sparse); pl.addLayout(row); tabs.addTab(part_tab, "工作区分区")
         super_tab = QWidget(); sl = QVBoxLayout(super_tab); sl.setContentsMargins(8, 8, 8, 8); sl.setSpacing(12)
-        self.super_table = self._table(["镜像", "来源", "大小"]); self.super_table.setMinimumHeight(260); sl.addWidget(self.super_table, 1)
+        self.super_table = self._table(["镜像", "来源", "大小"]); self.super_table.setMinimumHeight(260); sl.addWidget(self.super_table, 1); sl.addLayout(self._selection_bar(self.super_table, "super 镜像"))
         row = QHBoxLayout(); row.setSpacing(8); row.addWidget(self._button("合成 super.img", self._repack_super, True)); row.addStretch(); row.addWidget(QLabel("类型")); self.super_type = QComboBox(); self.super_type.addItems(["A-only", "A/B", "Virtual A/B"]); row.addWidget(self.super_type); self.super_sparse = QCheckBox("Sparse 输出"); row.addWidget(self.super_sparse); sl.addLayout(row); tabs.addTab(super_tab, "合成 super")
         bl.addStretch(0); layout.addWidget(box, 1)
         logbox, ll = self._card("任务日志", "后台任务输出、工具链下载和校验结果"); prog = QHBoxLayout(); self.progress = QProgressBar(); self.progress.setRange(0, 0); self.progress.hide(); prog.addWidget(self.progress, 1); self.cancel_btn = self._button("取消任务", self._cancel); self.cancel_btn.setEnabled(False); prog.addWidget(self.cancel_btn); ll.addLayout(prog); self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(20000); self.log.setMinimumHeight(150); ll.addWidget(self.log); layout.addWidget(logbox)
@@ -921,7 +963,12 @@ class ArtWindow(QMainWindow):
         """Return checked partition names, or None when the dialog is cancelled."""
         dialog = StyledDialog(self, title, (460, 500))
         layout = dialog.body
-        layout.addWidget(QLabel("请选择要提取的分区（默认全选）", objectName="muted"))
+        hint = QHBoxLayout(); hint.setSpacing(8)
+        hint.addWidget(QLabel("请选择要提取的分区", objectName="muted"))
+        toggle = QCheckBox("全选")
+        count = QLabel(objectName="muted")
+        hint.addStretch(); hint.addWidget(toggle); hint.addWidget(count)
+        layout.addLayout(hint)
         listing = QListWidget()
         listing.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         for entry in entries:
@@ -931,6 +978,30 @@ class ArtWindow(QMainWindow):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
         layout.addWidget(listing, 1)
+
+        def update_partition_count():
+            total = listing.count()
+            selected = sum(
+                listing.item(index).checkState() == Qt.CheckState.Checked
+                for index in range(total)
+            )
+            toggle.blockSignals(True)
+            toggle.setChecked(total > 0 and selected == total)
+            toggle.blockSignals(False)
+            count.setText(f"已选 {selected}/{total}")
+
+        def set_partition_selection(checked):
+            listing.blockSignals(True)
+            for index in range(listing.count()):
+                listing.item(index).setCheckState(
+                    Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+                )
+            listing.blockSignals(False)
+            update_partition_count()
+
+        toggle.toggled.connect(set_partition_selection)
+        listing.itemChanged.connect(lambda *_: update_partition_count())
+        update_partition_count()
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("提取")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")

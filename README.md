@@ -2,7 +2,7 @@
 
 #### **介绍**
 
-一个面向 Windows 的 Android ROM 工具，简称 **A.R.T**。本项目基于原作者 ColdWindScholar 的 [D.N.A3](https://github.com/ColdWindScholar/D.N.A3) 开源项目重构和扩展，保留原项目的许可证与致谢信息，现提供 Windows 图形界面、CLI 和 MCP 接口。
+一个面向 Windows 的 Android ROM 工具，简称 **A.R.T**。本项目基于 [ELF-RC/A.R.T](https://github.com/ELF-RC/A.R.T) 开源项目重构和扩展，保留原项目的许可证与致谢信息，现提供 Windows 图形界面、CLI 和 MCP 接口。
 
 #### **运行平台**
 
@@ -26,7 +26,7 @@ python Scripts/main.py --mcp  # MCP stdio 服务
 python Scripts/main.py        # 原有 CLI
 ```
 
-GUI 使用 `ttkbootstrap` 的浅色主题（默认），可在“工具链 → 界面外观”中切换浅色/深色；未安装时会自动回退到 Python 标准 `ttk`。主题偏好会保存到 `art-res/ui-settings.json`。图形界面覆盖 ROM ZIP、payload、super、IMG、WIN、DAT/DAT.BR 的导入、解包和回包，并提供 super 合成、RAW/Sparse 转换和工具链诊断。Windows 发布包优先使用 `art-res/bin-win-amd64` 中的原生工具；缺失的可下载工具可以在“工具链”页自动补齐，仍没有 Windows 版本的校验工具通过 WSL 兼容层运行。MCP 工具包含同一套工程、导入、解包、回包和 super 合成功能。
+GUI 使用 PySide6/Qt 的原生桌面工作台，浅色主题为默认，可在“工具链 → 界面外观”中切换浅色/深色；主题偏好会保存到 `art-res/ui-settings.json`。图形界面覆盖 ROM ZIP、payload、super、IMG、WIN、DAT/DAT.BR 的导入、解包和回包，并提供 super 合成、RAW/Sparse 转换和工具链诊断。Windows 发布包优先使用 `art-res/bin-win-amd64` 中的原生工具；缺失的可下载工具可以在“工具链”页自动补齐，仍没有 Windows 版本的校验工具通过 WSL 兼容层运行。MCP 工具包含同一套工程、导入、解包、回包和 super 合成功能。
 
 Windows 打包：
 

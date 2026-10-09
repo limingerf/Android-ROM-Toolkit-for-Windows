@@ -14,7 +14,7 @@ def scanfs(file: str) -> dict:
     :return:
     """
     filesystem_config = {}
-    with open(file, "r", encoding='utf-8') as file_:
+    with open(file, "r", encoding='utf-8', errors='surrogateescape') as file_:
         for i in file_.readlines():
             if not i.strip():
                 print("[W] data is empty!")
@@ -136,6 +136,6 @@ def patch_fsconfig(dir_path: str, fs_config: str):
     :return:
     """
     new_fs, new_add = fs_patch(scanfs(os.path.abspath(fs_config)), dir_path)
-    with open(fs_config, "w", encoding='utf-8', newline='\n') as f:
+    with open(fs_config, "w", encoding='utf-8', errors='surrogateescape', newline='\n') as f:
         f.writelines([f"{i} {' '.join(new_fs[i])}\n" for i in sorted(new_fs.keys())])
     print(f'FsPatcher: Added {new_add} entries')

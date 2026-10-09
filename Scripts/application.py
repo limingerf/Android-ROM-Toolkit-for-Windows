@@ -1,4 +1,4 @@
-"""Headless facade. Long operations run in isolated processes, never in Tk."""
+"""Headless facade. Long operations run in isolated worker processes."""
 from __future__ import annotations
 
 import json

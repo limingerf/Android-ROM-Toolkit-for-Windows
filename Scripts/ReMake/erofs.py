@@ -15,17 +15,13 @@ from Scripts.Primary.FileConfigPatcher import patch_fsconfig
 from Scripts.Primary.Console import display
 from Scripts.Primary.WorkSpace import load_image_json
 from Scripts.ReMake.dat_br import recompress_dat_br
+from Scripts.ReMake.metadata import normalize_metadata
 
 
 # Metadata normalization, image construction, and DAT hand-off.
 def walk_contexts(path):
-    """Deduplicate a generated fs config or SELinux contexts file."""
-    with open(path, "r", encoding="UTF-8") as source:
-        lines = list(set(source.readlines()))
-    if os.path.isfile(path):
-        os.remove(path)
-    with open(path, "a+", encoding="UTF-8") as target:
-        target.writelines(lines)
+    """Normalize generated metadata without changing rule order."""
+    return normalize_metadata(path)
 
 
 # Prepare sizes, timestamps, metadata, and output paths.
@@ -36,6 +32,7 @@ def _prepare(source, fsconfig, contexts, dumpinfo):
     if os.path.isfile(distance):
         os.remove(distance)
 
+    walk_contexts(fsconfig)
     patch_fsconfig(source, fsconfig)
     walk_contexts(fsconfig)
     walk_contexts(contexts)
@@ -121,6 +118,10 @@ def _write_image(state, fsconfig, contexts, source, flag):
     if V.SETUP_MANIFEST["REPACK_SPARSE_IMG"] == "1" or flag > 9:
         display("开始转换: sparse format ...")
         if call(["img2simg", new_distance, distance]) != 0:
+            try:
+                os.remove(new_distance)
+            except OSError:
+                pass
             return False
         try:
             os.remove(new_distance)
