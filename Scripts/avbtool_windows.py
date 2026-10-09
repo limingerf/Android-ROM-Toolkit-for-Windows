@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import shutil
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
@@ -152,8 +153,100 @@ def _verify_signature(header, blob):
         return False
 
 
-def _fec_unavailable(*_):
-    raise upstream.AvbError("当前内置 AVB 工具未启用 FEC，请添加 --do_not_generate_fec；哈希树和 RSA 签名仍可正常使用")
+_FEC_BLOCK_SIZE = 4096
+_FEC_MAX_PARITY = 24
+
+
+def _bundled_avbroot() -> Path | None:
+    """Return the bundled avbroot executable used for FEC generation.
+
+    AOSP's Python avbtool intentionally delegates Reed-Solomon generation to
+    the ``fec`` helper.  Windows releases do not ship that legacy helper, but
+    avbroot contains the same AOSP-compatible FEC implementation.  Calling
+    the bundled binary keeps the format and interleaving identical to Android
+    instead of shipping a second, subtly different implementation.
+    """
+    candidates = []
+    env_path = os.environ.get("ART_AVBROOT")
+    if env_path:
+        candidates.append(Path(env_path))
+    roots = [Path(__file__).resolve().parents[1]]
+    if getattr(sys, "frozen", False):
+        roots.insert(0, Path(sys.executable).resolve().parent)
+    candidates.extend(
+        resource_root / "art-res" / directory / "avbroot.exe"
+        for resource_root in roots
+        for directory in ("bin-win-amd64", "bin-win-arm64", "bin")
+    )
+    found = shutil.which("avbroot.exe") or shutil.which("avbroot")
+    if found:
+        candidates.append(Path(found))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _fec_params(image_size: int, num_roots: int) -> tuple[int, int]:
+    """Return (rounds, raw FEC bytes) for AOSP's 4 KiB interleaving."""
+    if image_size <= 0:
+        raise upstream.AvbError("FEC 输入镜像不能为空")
+    if not 2 <= int(num_roots) <= _FEC_MAX_PARITY:
+        raise upstream.AvbError(f"FEC roots 必须在 2 到 {_FEC_MAX_PARITY} 之间")
+    # Android partition images are block aligned.  avbtool's historical fec
+    # helper rounds the final partial block up, so retain that behavior for
+    # callers that use --calc_max_image_size with an unaligned size.
+    blocks = (int(image_size) + _FEC_BLOCK_SIZE - 1) // _FEC_BLOCK_SIZE
+    data_bytes = 255 - int(num_roots)
+    rounds = (blocks + data_bytes - 1) // data_bytes
+    return rounds, int(num_roots) * rounds * _FEC_BLOCK_SIZE
+
+
+def _calc_fec_data_size(image_size, num_roots):
+    """Replacement for ``fec --print-fec-size`` used by avbtool."""
+    return _fec_params(int(image_size), int(num_roots))[1]
+
+
+def _generate_fec_data(image_filename, num_roots):
+    """Generate AOSP FEC payload bytes through bundled avbroot.
+
+    ``avbroot fec generate`` writes the AOSP standalone header after the raw
+    parity bytes.  avbtool needs only those raw bytes for embedding in an AVB
+    image, so the header is validated and removed before returning.
+    """
+    executable = _bundled_avbroot()
+    if executable is None:
+        raise upstream.AvbError(
+            "Windows 原生 FEC 工具缺失，请补齐 art-res/bin-win-amd64/avbroot.exe"
+        )
+    expected_size = _calc_fec_data_size(os.path.getsize(image_filename), num_roots)
+    with tempfile.TemporaryDirectory(prefix=".art-fec-") as temporary:
+        output = Path(temporary) / "image.fec"
+        command = [str(executable), "fec", "generate", "--input", str(image_filename),
+                   "--fec", str(output), "--parity", str(num_roots)]
+        try:
+            from Scripts.Platform.runtime import process_options
+            result = subprocess.run(command, capture_output=True, **process_options())
+        except OSError as error:
+            raise upstream.AvbError(f"启动 Windows FEC 工具失败：{error}") from error
+        if result.returncode != 0 or not output.is_file():
+            detail = (result.stderr or result.stdout or b"").decode("utf-8", "replace").strip()
+            raise upstream.AvbError(f"FEC 生成失败{(': ' + detail) if detail else ''}")
+        blob = output.read_bytes()
+    if len(blob) < _FEC_BLOCK_SIZE or len(blob) - _FEC_BLOCK_SIZE != expected_size:
+        raise upstream.AvbError(
+            f"FEC 工具返回长度无效：得到 {max(0, len(blob) - _FEC_BLOCK_SIZE)}，"
+            f"预期 {expected_size}"
+        )
+    # Validate the avbroot/AOSP standalone footer before stripping its two
+    # 4 KiB header copies.  The raw FEC bytes are exactly the prefix.
+    footer = blob[-_FEC_BLOCK_SIZE:]
+    if footer[:4] != struct.pack("<I", 0xFECFECFE):
+        raise upstream.AvbError("FEC 工具返回了无法识别的 AOSP FEC 头")
+    parity, fec_size = struct.unpack_from("<II", footer, 12)
+    if parity != int(num_roots) or fec_size != expected_size:
+        raise upstream.AvbError("FEC 工具返回的 roots/size 与请求不一致")
+    return blob[:fec_size]
 
 
 def main(argv=None) -> int:
@@ -177,8 +270,8 @@ def main(argv=None) -> int:
         upstream.AvbHashtreeDescriptor.verify = _descriptor_verify
         upstream.open = _platform_open
         upstream.verify_vbmeta_signature = _verify_signature
-        upstream.calc_fec_data_size = _fec_unavailable
-        upstream.generate_fec_data = _fec_unavailable
+        upstream.calc_fec_data_size = _calc_fec_data_size
+        upstream.generate_fec_data = _generate_fec_data
         upstream.AvbTool().run(["avbtool", *args])
         return 0
     except SystemExit as error:

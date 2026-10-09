@@ -741,6 +741,7 @@ class ArtWindow(QMainWindow):
         row.addWidget(QLabel("目标 OTA")); row.addWidget(self.ota_zip, 1); row.addWidget(self._button("刷新状态", self._refresh_ota)); row.addWidget(self._button("打开 OTA_WORK", lambda: self._open_project("OTA_WORK"))); ol.addLayout(row)
         row = QHBoxLayout(); row.addWidget(self._button("导入 OTA ZIP", self._ota_import_zip)); row.addWidget(self._button("导入替换镜像", self._ota_import_images)); row.addStretch(); ol.addLayout(row)
         row = QHBoxLayout(); self.ota_key_status = QLabel(objectName="muted"); row.addWidget(self.ota_key_status, 1); self.ota_disable_avb = QCheckBox("禁用 AVB 修补"); row.addWidget(self.ota_disable_avb); row.addWidget(self._button("生成密钥", self._ota_generate)); row.addWidget(self._button("修补 OTA", self._ota_patch, True)); row.addWidget(self._button("验证 OTA", self._ota_verify, True)); ol.addLayout(row)
+        row = QHBoxLayout(); row.addWidget(QLabel("super 动态分区", objectName="muted")); self.ota_super = QLineEdit(); self.ota_super.setPlaceholderText("可选：新增分区名，逗号分隔，如 vendor_dlkm"); row.addWidget(self.ota_super, 1); ol.addLayout(row)
         self.ota_files = QPlainTextEdit(); self.ota_files.setReadOnly(True); self.ota_files.setMinimumHeight(110); ol.addWidget(self.ota_files); layout.addWidget(ota, 1)
         plugins, pl = self._card("插件 / 子模块", "对应原版 CLI 的 sub 入口；插件只安装包含 run.sh 的 ZIP")
         self.plugin_list = QListWidget(); self.plugin_list.setMinimumHeight(120); pl.addWidget(self.plugin_list)
@@ -845,7 +846,11 @@ class ArtWindow(QMainWindow):
 
     def _ota_patch(self):
         project = self._require_project()
-        if project: self._thread_call(lambda: self.controller.ota_patch(project, disable_avb=self.ota_disable_avb.isChecked()), "正在修补 OTA…")
+        if project:
+            names = [name.strip() for name in self.ota_super.text().replace("，", ",").split(",") if name.strip()]
+            self._thread_call(lambda: self.controller.ota_patch(
+                project, disable_avb=self.ota_disable_avb.isChecked(),
+                super_partitions=names), "正在修补 OTA…")
 
     def _refresh_plugins(self):
         if not hasattr(self, "plugin_list"):

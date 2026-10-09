@@ -104,8 +104,8 @@ def verify_source_footer(controller, tools, original, output, *, bits, kind):
                                        partition_name="system", output=str(output))
     check(result["ok"] and output.is_file(), "Source controller did not produce a signed image")
     if kind == "hashtree":
-        check("--do_not_generate_fec" in result["command"],
-              "Native hashtree must explicitly disable unavailable FEC")
+        check("--do_not_generate_fec" not in result["command"],
+              "Native hashtree should use the bundled FEC implementation")
     info = controller.avb_info(str(output))["output"]
     check(f"SHA256_RSA{bits}" in info, "Signed image uses an unexpected RSA algorithm")
     check(("Hashtree descriptor:" if kind == "hashtree" else "Hash descriptor:") in info,
@@ -135,7 +135,7 @@ def verify_frozen_footer(tools, original, output, *, bits, kind):
     before = digest(original)
     partition_size = 2 * 1024 * 1024
     command = "add_hash_footer" if kind == "hash" else "add_hashtree_footer"
-    fec_args = ["--do_not_generate_fec"] if kind == "hashtree" else []
+    fec_args = []
     maximum = tools.avb(command, "--partition_size", partition_size,
                         "--calc_max_image_size", *fec_args)
     maximum_values = [int(line.strip()) for line in maximum.splitlines() if line.strip().isdigit()]
@@ -151,6 +151,9 @@ def verify_frozen_footer(tools, original, output, *, bits, kind):
     check(f"SHA256_RSA{bits}" in info, "Frozen image uses an unexpected RSA algorithm")
     check(("Hashtree descriptor:" if kind == "hashtree" else "Hash descriptor:") in info,
           "Frozen image is missing its expected descriptor")
+    if kind == "hashtree":
+        check("FEC num roots:" in info and "FEC size:              0 bytes" not in info,
+              "Frozen hashtree image did not contain embedded FEC data")
     tools.avb("verify_image", "--image", output, "--key", f"builtin:rsa{bits}")
     tampered = output.with_name(output.stem + "_tampered.img")
     altered_copy(output, tampered)

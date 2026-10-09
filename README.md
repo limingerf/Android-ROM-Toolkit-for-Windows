@@ -1,6 +1,6 @@
 # **Android ROM Toolkit for Windows**
 
-当前版本：**v1.2.4**
+当前版本：**v1.2.5**
 
 #### **介绍**
 
@@ -8,7 +8,7 @@
 
 #### **运行平台**
 
-- Windows 10/11 x64：默认使用 Windows 原生工具及 EXE 内置的 AVB 工具。WSL 仅在工具链页明确选择并保存，或设置 `ART_BACKEND=wsl` 时启用。
+- Windows 10/11 x64：默认使用 Windows 原生工具及 EXE 内置的 AVB 工具。常规操作不会启动 WSL；只有 OTA 扩展参数需要内置兼容 avbroot 时，才会按需通过 `wsl.exe` 调用它。完整 WSL 后端仍需在工具链页明确选择并保存，或设置 `ART_BACKEND=wsl`。
 - Linux x86_64/arm64：继续使用原有 ELF 工具和 CLI 流程。
 - Windows 原生工具目录可通过 `ART_WINDOWS_TOOLS` 指定，例如 `E:\\MIO-KITCHEN-4.1.3-win\\bin\\Windows\\AMD64`。
 
@@ -42,9 +42,9 @@ python build.py
 
 - `avbtool` 基于 AOSP 1.3.0，连同 RSA 签名库内嵌到 `art.exe`。签名、验签、镜像信息和去除 footer 无需另装 Python、OpenSSL 或 WSL。源码运行需安装 `requirements.txt`。
 - “高级工具 → AVB 镜像签名”可选择无签名、内置 RSA2048 测试密钥、内置 RSA4096 测试密钥（默认）或自定义 PEM；RSA 算法自动匹配密钥位数。内置测试私钥随源码及 EXE 公开提供，正式发布签名请使用自己的密钥。
-- 原生哈希树签名保留哈希树与 RSA 签名，使用 `--do_not_generate_fec`。需要 FEC 的命令应选择支持 FEC 的外部工具。自动大小基于镜像逻辑大小计算并为哈希树与 AVB footer 预留空间。
+- 原生哈希树签名默认生成 AVB 内嵌 FEC。AOSP `avbtool` 的 FEC 数据由随包的 `avbroot fec generate` 生成，格式、交错布局和 roots 参数与 Android `fec` 工具一致；`--do_not_generate_fec` 仍可显式关闭。自动大小基于镜像逻辑大小计算并为哈希树、FEC 与 AVB footer 预留空间。
 - 发布包附带官方 Windows x64 `avbroot 3.34.1`。缺失时在首次运行相应操作或“自动补齐 Windows 工具”中查询官方最新稳定版，验证 SHA256 与实际版本后安装。
-- 官方 `avbroot` 支持现有 OTA 分区替换和签名，不提供原项目扩展版的 `--add-partition`、`--disable-avb` 或 `--super-mode`。这些操作会明确提示工具不支持；可配置兼容扩展版保留对应功能。
+- 发布包同时保留原项目的扩展 avbroot 构建。OTA 使用 `--add-partition`、`--disable-avb` 或原版 `--super-mode` 时，Windows 原生后端会自动调用这个内置兼容工具（`--super-mode NAME` 会转换为动态分区标记）；普通 OTA 替换、AVB 和 FEC 仍走 Windows 原生工具。扩展构建通过随包的 `art-res/bin-amd64/avbroot` 运行，Windows 需要启用 `wsl.exe`，无需在工具链页切换后端。
 - 深浅色主题统一下拉列表的边框、文本、选中背景及禁用状态；签名失败会保留工具错误信息。
 
 可用 `art.exe --avbtool version` 检查内置工具。发布前的真实工具检查：

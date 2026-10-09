@@ -471,6 +471,16 @@ class Toolchain:
         if not self.available:
             raise ToolchainError("已选择 WSL 后端，但找不到 wsl.exe。")
 
+    def _extended_avbroot(self) -> tuple[Path, str] | None:
+        """Return the embedded extended avbroot and WSL launcher if usable."""
+        if self.mode != "native":
+            return None
+        linux_tool = self.root / "art-res" / "bin-amd64" / "avbroot"
+        wsl = shutil.which("wsl.exe")
+        if not wsl or not linux_tool.is_file():
+            return None
+        return linux_tool, wsl
+
     def command(self, argv: Sequence[str | os.PathLike[str]], bundled: bool = True) -> list[str]:
         self.ensure()
         args = [os.fspath(item) for item in argv]
@@ -478,6 +488,37 @@ class Toolchain:
             raise ValueError("命令不能为空")
         if bundled:
             args[0] = self.resolve(args[0])
+        # The upstream Windows avbroot release intentionally exposes only the
+        # stable OTA patch surface.  A.R.T also ships the original extended
+        # build (the one used by the Linux project) for --add-partition and
+        # --disable-avb.  Route only those advanced OTA invocations through
+        # that embedded binary; ordinary native AVB/OTA operations remain
+        # entirely Windows-native.  --super-mode is A.R.T's historical name
+        # for avbroot's --dynamic-partition option.
+        if (self.mode == "native" and Path(args[0]).name.lower() in {"avbroot", "avbroot.exe"}
+                and len(args) >= 2 and args[1:3] == ["ota", "patch"]):
+            extended = any(flag in args for flag in (
+                "--add-partition", "--disable-avb", "--super-mode", "--dynamic-partition"))
+            if "--super-mode" in args:
+                translated = []
+                for value in args:
+                    translated.append("--dynamic-partition" if value == "--super-mode" else value)
+                args = translated
+                extended = True
+            if extended:
+                bridge = self._extended_avbroot()
+                if bridge is None:
+                    raise ToolchainError(
+                        "高级 OTA 参数需要随软件内置的 avbroot 扩展工具和 WSL；"
+                        "请确认 art-res/bin-amd64/avbroot 存在且 wsl.exe 可用。")
+                linux_tool, wsl = bridge
+                converted = [windows_to_wsl(value) for value in args]
+                # Git/ZIP extraction on NTFS does not preserve the executable
+                # bit.  Set it for this invocation, then replace the shell
+                # with avbroot so signals and exit codes are preserved.
+                script = 'chmod +x "$1" && exec "$@"'
+                return [wsl, "--cd", windows_to_wsl(self.root), "--exec", "sh", "-c",
+                        script, "art", windows_to_wsl(linux_tool), *converted[1:]]
         if args[0] == BUILTIN_AVBTOOL:
             if self.mode != "native":
                 raise ToolchainError("内置 avbtool 入口仅用于 Windows 原生后端")
@@ -515,7 +556,8 @@ class Toolchain:
         errors = kwargs.pop("errors", None)
         if isinstance(kwargs.get("input"), str):
             kwargs["input"] = kwargs["input"].encode(encoding or "utf-8", errors or "strict")
-        result = subprocess.run(self.command(argv), env=self.environment(kwargs.pop("env", None)),
+        command = self.command(argv)
+        result = subprocess.run(command, env=self.environment(kwargs.pop("env", None)),
                                 **process_options(), **kwargs)
         if text_output or encoding or errors:
             for name in ("stdout", "stderr"):
@@ -523,6 +565,31 @@ class Toolchain:
                 if value is not None:
                     decoder = _ToolOutputDecoder()
                     setattr(result, name, "".join(decoder.feed(value, final=True)))
+        # WSL 2.7 emits a localized localhost/NAT notice on every launch on
+        # some Windows configurations.  It is an implementation detail of
+        # the embedded extended avbroot bridge, not tool output, and should
+        # not leak into the native GUI log.
+        if (self.mode == "native" and command and Path(command[0]).name.lower() == "wsl.exe"):
+            for name in ("stdout", "stderr"):
+                value = getattr(result, name)
+                if isinstance(value, str):
+                    lines = value.splitlines()
+                    setattr(result, name, "\n".join(
+                        line for line in lines if not line.lstrip().lower().startswith("wsl:")))
+        # Keep the normal OTA capability probe native.  The Windows upstream
+        # binary does not list A.R.T's extension flags, so advertise them in
+        # the captured help only when the embedded bridge is actually usable.
+        raw_args = [os.fspath(item) for item in argv]
+        if (self.mode == "native" and len(raw_args) >= 4
+                and Path(raw_args[0]).name.lower() in {"avbroot", "avbroot.exe"}
+                and raw_args[1:3] == ["ota", "patch"] and "--help" in raw_args
+                and self._extended_avbroot() is not None and result.returncode == 0):
+            advertised = (
+                "\n  --add-partition PARTITION FILE [SIZE]\n"
+                "  --disable-avb\n"
+                "  --dynamic-partition PARTITION\n"
+            )
+            result.stdout = (result.stdout or "") + advertised
         return result
 
     def run(self, argv, *, bundled=True, shell=False, output=True, env=None) -> int:

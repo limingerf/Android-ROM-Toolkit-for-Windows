@@ -100,6 +100,28 @@ class BackendTests(unittest.TestCase):
                     toolchain.command(["e2fsck", "-fn", "system.img"])
             self.assertEqual(toolchain.label, "Windows 原生")
 
+    @unittest.skipUnless(os.name == "nt", "Windows-specific native bridge")
+    def test_extended_ota_flags_use_embedded_bridge_and_translate_super_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            native = root / "art-res" / "bin-win-amd64"
+            linux = root / "art-res" / "bin-amd64"
+            native.mkdir(parents=True)
+            linux.mkdir(parents=True)
+            (native / "avbroot.exe").write_bytes(b"windows")
+            (linux / "avbroot").write_bytes(b"linux")
+            toolchain = Toolchain("native", root, native, (native,), "wsl.exe", linux)
+            with patch("Scripts.Platform.runtime.shutil.which", return_value="wsl.exe"):
+                command = toolchain.command([
+                    "avbroot", "ota", "patch", "--add-partition", "vendor_dlkm",
+                    r"E:\art\vendor_dlkm.img", "--super-mode", "vendor_dlkm",
+                    "--disable-avb",
+                ])
+            self.assertEqual(command[0], "wsl.exe")
+            self.assertIn("--dynamic-partition", command)
+            self.assertNotIn("--super-mode", command)
+            self.assertIn("/mnt/e/art/vendor_dlkm.img", command)
+
     @unittest.skipUnless(os.name == "nt", "Windows-specific detection")
     def test_native_detection_and_explicit_wsl_selection(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"ART_BACKEND": "native"}):

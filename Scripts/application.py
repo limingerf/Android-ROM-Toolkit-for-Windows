@@ -407,7 +407,9 @@ class ArtController:
         part = partition_name or image_path.stem
         command = "add_hash_footer" if kind == "hash" else "add_hashtree_footer"
         args = [command, "--image", target, "--partition_name", part, "--algorithm", algorithm]
-        fec_args = ["--do_not_generate_fec"] if kind == "hashtree" and self.toolchain.mode == "native" else []
+        # Windows avbtool delegates FEC to the bundled avbroot implementation;
+        # keep the default embedded FEC instead of silently disabling it.
+        fec_args = []
         args.extend(fec_args)
         if partition_size is None:
             # Sparse files have a much larger logical size than their ZIP-like
@@ -516,8 +518,28 @@ class ArtController:
         if pkmd.is_file(): args.extend(["--public-key-avb", pkmd])
         result = self._tool_capture("avbroot", args, cwd=layout.ota_work_dir); result.update({"archive": str(zip_path), "verified": result["ok"]}); return result
 
-    def ota_patch(self, project: str, *, disable_avb: bool = False) -> dict:
-        """Patch the selected stock OTA using images staged in input-img."""
+    def ota_patch(self, project: str, *, disable_avb: bool = False,
+                  super_partitions: list[str] | None = None,
+                  partition_sizes: dict[str, int | str] | None = None) -> dict:
+        """Patch the selected stock OTA using images staged in input-img.
+
+        ``super_partitions`` keeps compatibility with the original A.R.T
+        command line, where ``--super-mode NAME`` marks an added partition as
+        part of the dynamic super group.  The native command adapter translates
+        that historical spelling to avbroot's ``--dynamic-partition`` flag.
+        """
+        super_partitions = [str(name).strip() for name in (super_partitions or []) if str(name).strip()]
+        normalized_sizes = {}
+        for name, value in (partition_sizes or {}).items():
+            text = str(value).strip()
+            try:
+                size = int(text, 0)
+            except ValueError:
+                size = int(text, 10)
+            if size <= 0:
+                raise ValueError(f"分区 {name} 的大小必须大于 0")
+            normalized_sizes[str(name).strip()] = size
+        partition_sizes = normalized_sizes
         layout = self._layout(project); status = self.ota_status(project)
         if not status["selected"]: raise ValueError("请先在 OTA_WORK/stock-zip 中选择 OTA 包")
         zip_path = layout.ota_stockzip_dir / status["selected"]
@@ -550,6 +572,14 @@ class ArtController:
         for image in images:
             part = image.stem
             args.extend(["--replace" if part in existing else "--add-partition", part, image])
+            if part not in existing and part in partition_sizes:
+                args.append(str(partition_sizes[part]))
+        for part in super_partitions:
+            if part not in {image.stem for image in images}:
+                raise ValueError(f"super 分区 {part} 没有对应的 input-img 镜像")
+            if part in existing:
+                raise ValueError(f"super 分区 {part} 已存在于 OTA，不能作为新增动态分区标记")
+            args.extend(["--super-mode", part])
         if disable_avb: args.extend(["--disable-avb", "--skip-system-ota-cert"])
         with tempfile.TemporaryDirectory(prefix=".art-ota-", dir=layout.ota_work_dir) as stage_dir:
             staged = Path(stage_dir) / output.name
@@ -560,7 +590,9 @@ class ArtController:
             if not staged.is_file() or staged.stat().st_size == 0:
                 raise RuntimeError("OTA 修补未生成有效 ZIP 文件")
             os.replace(staged, output)
-        result.update({"archive": str(output), "disabled_avb": disable_avb})
+        result.update({"archive": str(output), "disabled_avb": disable_avb,
+                       "super_partitions": super_partitions,
+                       "partition_sizes": partition_sizes})
         return result
 
     def job_request(self, operation: str, **params) -> dict:

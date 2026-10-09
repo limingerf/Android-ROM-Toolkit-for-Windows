@@ -39,7 +39,7 @@ TOOLS = [
     {"name": "art_ota_select", "description": "选择 OTA_WORK/stock-zip 中的 OTA 包。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "name": {"type": "string"}}, "required": ["project", "name"]}},
     {"name": "art_ota_verify", "description": "使用 avbroot 验证 OTA 包签名。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "archive": {"type": "string"}}, "required": ["project"]}},
     {"name": "art_ota_generate_keys", "description": "为工程生成 AVB/OTA 密钥材料。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "passphrase": {"type": "string"}}, "required": ["project"]}},
-    {"name": "art_ota_patch", "description": "使用 OTA_WORK/input-img 中的镜像修补选定 OTA 包。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "disable_avb": {"type": "boolean"}}, "required": ["project"]}},
+    {"name": "art_ota_patch", "description": "使用 OTA_WORK/input-img 中的镜像修补选定 OTA 包；可禁用 AVB，并将新增镜像标记为 super 动态分区。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "disable_avb": {"type": "boolean"}, "super_partitions": {"type": "array", "items": {"type": "string"}}, "partition_sizes": {"type": "object", "additionalProperties": {"type": ["integer", "string"]}}}, "required": ["project"]}},
     {"name": "art_list_plugins", "description": "列出已安装的 CLI 插件/子模块。", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "art_install_plugin", "description": "安全安装包含 run.sh 的 CLI 插件 ZIP。", "inputSchema": {"type": "object", "properties": {"source": {"type": "string"}, "replace": {"type": "boolean"}}, "required": ["source"]}},
     {"name": "art_remove_plugin", "description": "删除已安装的 CLI 插件。", "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
@@ -79,7 +79,10 @@ class McpServer:
             "art_ota_select": lambda: self.controller.ota_select_zip(args.get("project", ""), args.get("name", "")),
             "art_ota_verify": lambda: self.controller.ota_verify(args.get("project", ""), args.get("archive")),
             "art_ota_generate_keys": lambda: self.controller.ota_generate_keys(args.get("project", ""), args.get("passphrase", "")),
-            "art_ota_patch": lambda: self.controller.ota_patch(args.get("project", ""), disable_avb=args.get("disable_avb", False)),
+            "art_ota_patch": lambda: self.controller.ota_patch(
+                args.get("project", ""), disable_avb=args.get("disable_avb", False),
+                super_partitions=args.get("super_partitions"),
+                partition_sizes=args.get("partition_sizes")),
             "art_list_plugins": lambda: self.controller.list_plugins(),
             "art_install_plugin": lambda: self.controller.install_plugin(args.get("source", ""), replace=args.get("replace", True)),
             "art_remove_plugin": lambda: self.controller.remove_plugin(args.get("name", "")),
@@ -222,8 +225,12 @@ def main(root=None):
             return controller.ota_generate_keys(project, passphrase)
 
         @server.tool()
-        def art_ota_patch(project: str, disable_avb: bool = False) -> dict:
-            return controller.ota_patch(project, disable_avb=disable_avb)
+        def art_ota_patch(project: str, disable_avb: bool = False,
+                          super_partitions: list[str] | None = None,
+                          partition_sizes: dict | None = None) -> dict:
+            return controller.ota_patch(project, disable_avb=disable_avb,
+                                        super_partitions=super_partitions,
+                                        partition_sizes=partition_sizes)
 
         @server.tool()
         def art_list_plugins() -> list[dict]:
