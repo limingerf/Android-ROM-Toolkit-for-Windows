@@ -2,7 +2,7 @@
 
 #### **介绍**
 
-一个面向 Windows 的 Android ROM 工具，简称 **A.R.T**。本项目基于 [ELF-RC/A.R.T](https://github.com/ELF-RC/A.R.T) 开源项目重构和扩展，保留原项目的许可证与致谢信息，现提供 Windows 图形界面、CLI 和 MCP 接口。
+一个面向 Windows 的 Android ROM 工具，简称 **A.R.T**。本项目基于原作者 ELF-RC 的 [A.R.T](https://github.com/ELF-RC/A.R.T/tree/master?tab=readme-ov-file) 开源项目重构和扩展，保留原项目的许可证与致谢信息，现提供 Windows 图形界面、CLI 和 MCP 接口。
 
 #### **运行平台**
 
