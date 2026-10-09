@@ -17,16 +17,16 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, QEvent, QPoint
-from PySide6.QtGui import QAction, QIcon, QFont, QPixmap, QDesktopServices
+from PySide6.QtGui import QAction, QIcon, QFont, QPixmap, QDesktopServices, QRegion, QPainterPath
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget, QHeaderView,
-    QScrollArea, QSizePolicy,
+    QScrollArea, QSizePolicy, QAbstractItemView,
 )
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, QRectF
 
 from Scripts.application import ArtController, ROOT
 from Scripts.Platform.runtime import CAPABILITIES, process_options
@@ -137,6 +137,41 @@ class TitleBar(QFrame):
         super().mouseReleaseEvent(event)
 
 
+class StyledDialog(QDialog):
+    """Frameless rounded dialog sharing the workbench visual language."""
+
+    def __init__(self, parent, title, minimum_size=(420, 260)):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setMinimumSize(*minimum_size)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(0)
+        panel = QFrame(objectName="dialogPanel")
+        outer.addWidget(panel)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
+        header = QFrame(objectName="dialogTitlebar")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 0, 8, 0)
+        header_layout.setSpacing(8)
+        label = QLabel(title, objectName="dialogTitle")
+        header_layout.addWidget(label)
+        header_layout.addStretch(1)
+        close = QPushButton("×", objectName="dialogClose")
+        close.setFixedSize(34, 30)
+        close.setToolTip("关闭")
+        close.clicked.connect(self.reject)
+        header_layout.addWidget(close)
+        panel_layout.addWidget(header)
+        self.body = QVBoxLayout()
+        self.body.setContentsMargins(18, 16, 18, 16)
+        self.body.setSpacing(12)
+        panel_layout.addLayout(self.body, 1)
+
+
 class ArtWindow(QMainWindow):
     def __init__(self, controller: ArtController):
         super().__init__()
@@ -144,6 +179,7 @@ class ArtWindow(QMainWindow):
         # surface.  The edge resize handler below keeps normal desktop window
         # behavior without relying on platform-specific non-client painting.
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.controller = controller
         self.events: queue.Queue = queue.Queue()
         self.process = None
@@ -184,6 +220,17 @@ class ArtWindow(QMainWindow):
                 self.setWindowIcon(QIcon(str(path)))
                 QApplication.instance().setWindowIcon(QIcon(str(path)))
                 return
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Clip the translucent top-level window to the same radius as the
+        # content. Maximized windows use the full desktop rectangle.
+        if self.isMaximized():
+            self.clearMask()
+            return
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), 18, 18)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     @staticmethod
     def _icon_path():
@@ -295,8 +342,15 @@ class ArtWindow(QMainWindow):
         sheet = """
             * { font-family: 'Microsoft YaHei UI'; font-size: 10pt; }
             QWidget { color: #142238; }
-            QMainWindow, QWidget#root, QWidget#windowBody, QStackedWidget { background: #eef3fb; }
+            QMainWindow { background: transparent; }
+            QWidget#root, QWidget#windowBody, QStackedWidget { background: #eef3fb; }
+            QWidget#root { border-radius: 18px; }
             QFrame#titlebar { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #e6edff, stop:0.52 #f6f8ff, stop:1 #e6f8f6); border-bottom: 1px solid #d4e0f2; }
+            QFrame#dialogPanel { background: #f7faff; border: 1px solid #c9d9ef; border-radius: 16px; }
+            QFrame#dialogTitlebar { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #e6edff, stop:1 #e7f7f4); border-top-left-radius: 16px; border-top-right-radius: 16px; min-height: 44px; }
+            QLabel#dialogTitle { font-size: 11pt; font-weight: 700; color: #1b355b; }
+            QPushButton#dialogClose { border: 0; border-radius: 7px; background: transparent; color: #61728b; font-size: 16pt; padding: 0; }
+            QPushButton#dialogClose:hover { background: #e05e78; color: white; }
             QLabel#windowTitle { font-size: 11pt; font-weight: 700; color: #17253c; }
             QLabel#windowSubtitle { color: #6e7d95; font-size: 9pt; }
             QLabel#titleIcon { background: transparent; }
@@ -308,14 +362,15 @@ class ArtWindow(QMainWindow):
             QScrollBar:vertical { background: transparent; width: 10px; margin: 5px 0; }
             QScrollBar::handle:vertical { background: #b8c9e3; border-radius: 5px; min-height: 32px; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-            QFrame#card, QGroupBox { background: rgba(255,255,255,218); border: 1px solid rgba(196,211,232,210); border-radius: 14px; }
+            QFrame#card, QGroupBox { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(255,255,255,235), stop:1 rgba(241,248,255,220)); border: 1px solid rgba(196,211,232,210); border-radius: 14px; }
             QGroupBox { margin-top: 12px; padding: 18px 12px 12px 12px; }
             QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 7px; font-weight: 700; color: #1c3356; background: #eef3fb; }
             QLabel#muted { color: #6c7d96; }
+            QLabel#dialogHint { color: #466b9f; font-weight: 700; padding-bottom: 2px; }
             QLabel#title { font-size: 20pt; font-weight: 750; color: #14294a; }
-            QPushButton { border: 1px solid #c4d1e5; border-radius: 8px; padding: 8px 15px; background: rgba(255,255,255,235); color: #1c355b; }
+            QPushButton { border: 1px solid #b9cce6; border-radius: 9px; padding: 8px 15px; background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(255,255,255,245), stop:0.58 rgba(239,246,255,235), stop:1 rgba(231,249,246,230)); color: #1c355b; }
             QPushButton#secondary { min-height: 34px; font-weight: 600; }
-            QPushButton:hover { background: #e6efff; border-color: #638bd2; }
+            QPushButton:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f9fcff, stop:0.58 #e0edff, stop:1 #d9f5f0); border-color: #638bd2; }
             QPushButton:pressed { background: #d2e1fb; padding-top: 9px; }
             QPushButton#primary { color: white; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3c70d6, stop:1 #517fde); border-color: #3c70d6; font-weight: 650; }
             QPushButton#primary:hover { background: #315dbb; }
@@ -327,7 +382,11 @@ class ArtWindow(QMainWindow):
             QListWidget#nav::item:selected { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d4e3ff, stop:1 #dff4f3); color: #173c70; font-weight: 700; }
             QLineEdit, QComboBox, QSpinBox { background: rgba(255,255,255,235); border: 1px solid #c4d1e5; border-radius: 7px; padding: 6px; selection-background-color: #8eb2ee; }
             QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #638bd2; }
-            QTableWidget { background: rgba(255,255,255,220); alternate-background-color: #f3f7fd; border: 1px solid #cedbeb; border-radius: 9px; gridline-color: #e3eaf3; }
+            QComboBox QAbstractItemView, QListWidget { background: #f8fbff; border: 1px solid #c9d9ef; border-radius: 9px; padding: 4px; outline: 0; }
+            QListWidget::item { padding: 8px 10px; border-radius: 7px; }
+            QListWidget::item:hover { background: #e7f0ff; }
+            QListWidget::item:selected { background: #d7e7ff; color: #173c70; }
+            QTableWidget { background: rgba(255,255,255,220); alternate-background-color: #f3f7fd; border: 1px solid #cedbeb; border-radius: 9px; gridline-color: #e3eaf3; selection-background-color: #d5e6ff; selection-color: #173c70; }
             QHeaderView::section { background: #e6edf7; padding: 8px; border: 0; font-weight: 650; color: #365174; }
             QPlainTextEdit { background: #f2f6fb; border: 1px solid #cedbeb; border-radius: 8px; font-family: Consolas; }
             QProgressBar { border: 0; background: #dfe8f4; border-radius: 5px; height: 9px; text-visible: false; }
@@ -338,11 +397,17 @@ class ArtWindow(QMainWindow):
             QTabBar::tab:selected { background: #d6e5ff; color: #204a85; font-weight: 700; }
             QCheckBox { spacing: 7px; color: #51647f; }
             QSplitter::handle { background: #d4dfed; }
+            QDialogButtonBox QPushButton { min-width: 78px; }
         """
         if self.ui_theme == "dark":
             sheet += """
                 QWidget { color: #ecf2fc; }
-                QMainWindow, QWidget#root, QWidget#windowBody, QStackedWidget { background: #101721; }
+                QMainWindow { background: transparent; }
+                QWidget#root, QWidget#windowBody, QStackedWidget { background: #101721; }
+                QFrame#dialogPanel { background: #172235; border-color: #38506e; }
+                QFrame#dialogTitlebar { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1b2b48, stop:1 #173737); border-color: #38506e; }
+                QLabel#dialogTitle { color: #edf4ff; }
+                QPushButton#dialogClose { color: #b9c9e1; }
                 QFrame#titlebar { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #192743, stop:0.52 #1d2638, stop:1 #173736); border-color: #2f4463; }
                 QLabel#windowTitle { color: #edf4ff; } QLabel#windowSubtitle { color: #9eafc9; }
                 QPushButton#windowMin, QPushButton#windowMax, QPushButton#windowClose { color: #b9c9e1; }
@@ -352,8 +417,9 @@ class ArtWindow(QMainWindow):
                 QFrame#card, QGroupBox, QTableWidget, QLineEdit, QComboBox, QSpinBox { background: rgba(26,37,55,230); border-color: #334962; }
                 QGroupBox::title { background: #101721; color: #d5e3fb; }
                 QLabel#muted { color: #95a8c3; }
+                QLabel#dialogHint { color: #b9d5ff; }
                 QLabel#title { color: #edf4ff; }
-                QPushButton { background: #1a2638; color: #ecf2fc; border-color: #3c526f; }
+                QPushButton { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #223653, stop:1 #1a3039); color: #ecf2fc; border-color: #3c526f; }
                 QPushButton:pressed { background: #14243b; }
                 QPushButton:hover { background: #263d60; }
                 QListWidget#nav::item:selected { background: #294467; color: #f4f8ff; }
@@ -362,6 +428,9 @@ class ArtWindow(QMainWindow):
                 QHeaderView::section { background: #202e44; color: #c8d8ef; }
                 QTabBar::tab:selected { background: #294a72; color: #eff6ff; }
                 QTabWidget::pane { border-color: #324860; background: rgba(20,31,46,140); }
+                QComboBox QAbstractItemView, QListWidget { background: #172235; border-color: #38506e; }
+                QListWidget::item:hover { background: #263d60; }
+                QListWidget::item:selected { background: #294a72; color: #eff6ff; }
                 QCheckBox { color: #aebed5; }
                 QSplitter::handle { background: #2f4158; }
             """
@@ -467,6 +536,11 @@ class ArtWindow(QMainWindow):
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setSelectionMode(select)
         table.setAlternatingRowColors(True)
+        table.setShowGrid(False)
+        table.setWordWrap(False)
+        table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setDefaultSectionSize(36)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         table.verticalHeader().setVisible(False)
         return table
@@ -485,7 +559,7 @@ class ArtWindow(QMainWindow):
         self.project_table.itemSelectionChanged.connect(self._select_project)
         self.project_table.cellDoubleClicked.connect(lambda *_: self.nav.setCurrentRow(1))
         bl.addWidget(self.project_table)
-        row = QHBoxLayout(); b = self._button("刷新", self.refresh); row.addWidget(b); row.addStretch(); row.addWidget(self._button("打开工程目录", self._open_project)); bl.addLayout(row)
+        row = QHBoxLayout(); b = self._button("刷新", self.refresh); row.addWidget(b); row.addStretch(); row.addWidget(self._button("打开工程目录", self._open_project)); row.addWidget(self._button("删除工程", self._delete_project)); bl.addLayout(row)
         splitter.addWidget(box)
         box2, bl2 = self._card("新建工程", "独立目录便于保留原始输入和每次构建的工作现场")
         self.new_name = QLineEdit(); self.new_name.setPlaceholderText("例如 DNA_MAYFLY_ORIGIN")
@@ -495,27 +569,25 @@ class ArtWindow(QMainWindow):
         self.pages.addWidget(page)
 
     def _images_page(self):
-        page = QWidget(); layout = QVBoxLayout(page)
-        layout.setContentsMargins(4, 4, 12, 18); layout.setSpacing(16)
-        box, bl = self._card("镜像与分区", "Payload / super 提取到 OUT；文件系统镜像提取到 WORKSPACE")
-        top = QHBoxLayout(); top.addWidget(self._button("导入文件", self._import_files, True)); top.addWidget(self._button("导入 ROM ZIP", self._import_archive)); top.addWidget(self._button("刷新", self.refresh_inputs)); top.addStretch(); top.addWidget(self._button("打开输出", lambda: self._open_project("OUT"))); bl.addLayout(top)
-        tabs = QTabWidget(); bl.addWidget(tabs, 1)
-        input_tab = QWidget(); il = QVBoxLayout(input_tab)
-        self.input_table = self._table(["文件", "格式", "大小"]); il.addWidget(self.input_table)
-        row = QHBoxLayout(); row.addWidget(self._button("提取所选", self._extract, True)); self.deep = QCheckBox("继续解包 Payload / super 中的 IMG"); self.deep.setChecked(True); row.addWidget(self.deep); row.addWidget(self._button("转为 Sparse", lambda: self._convert("sparse"))); row.addWidget(self._button("转为 RAW", lambda: self._convert("raw"))); il.addLayout(row)
-        fmt = QGridLayout(); fmt.setHorizontalSpacing(8); fmt.setVerticalSpacing(8); fmt.addWidget(QLabel("按类型解包", objectName="muted"), 0, 0)
-        for label, value in (("解包 IMG", "img"), ("解包 Payload", "payload"), ("解包 DAT", "dat"), ("解包 DAT.BR", "dat.br"), ("解包 WIN", "win"), ("解包 super", "super")):
-            index = list(("img", "payload", "dat", "dat.br", "win", "super")).index(value)
-            fmt.addWidget(self._button(label, lambda checked=False, v=value: self._extract_format(v)), index // 3, index % 3 + 1)
-        il.addLayout(fmt); tabs.addTab(input_tab, "输入文件")
-        part_tab = QWidget(); pl = QVBoxLayout(part_tab)
-        self.partition_table = self._table(["分区", "原文件系统"]); pl.addWidget(self.partition_table)
-        row = QHBoxLayout(); row.addWidget(self._button("回包所选分区", self._repack, True)); row.addWidget(self._button("打开工作区", lambda: self._open_project("WORKSPACE"))); row.addStretch(); row.addWidget(QLabel("回包格式")); self.repack_target = QComboBox(); self.repack_target.addItems(["IMG", "DAT", "DAT.BR"]); row.addWidget(self.repack_target); self.sparse = QCheckBox("输出 Sparse"); row.addWidget(self.sparse); pl.addLayout(row); tabs.addTab(part_tab, "工作区分区")
-        super_tab = QWidget(); sl = QVBoxLayout(super_tab)
-        self.super_table = self._table(["镜像", "来源", "大小"]); sl.addWidget(self.super_table)
-        row = QHBoxLayout(); row.addWidget(self._button("合成 super.img", self._repack_super, True)); row.addStretch(); row.addWidget(QLabel("类型")); self.super_type = QComboBox(); self.super_type.addItems(["A-only", "A/B", "Virtual A/B"]); row.addWidget(self.super_type); self.super_sparse = QCheckBox("Sparse 输出"); row.addWidget(self.super_sparse); sl.addLayout(row); tabs.addTab(super_tab, "合成 super")
-        layout.addWidget(box, 1)
-        logbox, ll = self._card("任务日志"); prog = QHBoxLayout(); self.progress = QProgressBar(); self.progress.setRange(0, 0); self.progress.hide(); prog.addWidget(self.progress, 1); self.cancel_btn = self._button("取消", self._cancel); self.cancel_btn.setEnabled(False); prog.addWidget(self.cancel_btn); ll.addLayout(prog); self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(20000); self.log.setMinimumHeight(130); ll.addWidget(self.log); layout.addWidget(logbox)
+        page = QWidget(); page.setMinimumHeight(820); layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 12, 18); layout.setSpacing(14)
+        box, bl = self._card("镜像与分区", "先导入输入，再选择任务；分区列表和日志各自保留可用空间")
+        top = QHBoxLayout(); top.setSpacing(8)
+        top.addWidget(self._button("导入文件", self._import_files, True)); top.addWidget(self._button("导入 ROM ZIP", self._import_archive)); top.addWidget(self._button("刷新", self.refresh_inputs)); top.addStretch(); top.addWidget(self._button("打开输出", lambda: self._open_project("OUT")))
+        bl.addLayout(top)
+        tabs = QTabWidget(); tabs.setMinimumHeight(500); bl.addWidget(tabs, 1)
+        input_tab = QWidget(); il = QVBoxLayout(input_tab); il.setContentsMargins(8, 8, 8, 8); il.setSpacing(12)
+        self.input_table = self._table(["文件", "格式", "大小"]); self.input_table.setMinimumHeight(240); il.addWidget(self.input_table, 1)
+        action_row = QHBoxLayout(); action_row.setSpacing(8); action_row.addWidget(self._button("提取所选", self._extract, True)); self.deep = QCheckBox("Payload / super 继续解包内部 IMG"); self.deep.setChecked(True); action_row.addWidget(self.deep); action_row.addStretch(); action_row.addWidget(self._button("转为 Sparse", lambda: self._convert("sparse"))); action_row.addWidget(self._button("转为 RAW", lambda: self._convert("raw"))); il.addLayout(action_row)
+        format_row = QHBoxLayout(); format_row.setSpacing(8); format_row.addWidget(QLabel("批量解包类型", objectName="muted")); self.extract_type = QComboBox(); self.extract_type.addItem("IMG / Sparse / Boot", "img"); self.extract_type.addItem("Payload.bin", "payload"); self.extract_type.addItem("new.dat", "dat"); self.extract_type.addItem("new.dat.br", "dat.br"); self.extract_type.addItem("WIN 分片", "win"); self.extract_type.addItem("super.img", "super"); format_row.addWidget(self.extract_type, 1); format_row.addWidget(self._button("按类型提取", self._extract_selected_type, True)); il.addLayout(format_row); tabs.addTab(input_tab, "输入文件")
+        part_tab = QWidget(); pl = QVBoxLayout(part_tab); pl.setContentsMargins(8, 8, 8, 8); pl.setSpacing(12)
+        self.partition_table = self._table(["分区", "原文件系统"]); self.partition_table.setMinimumHeight(300); pl.addWidget(self.partition_table, 1)
+        row = QHBoxLayout(); row.setSpacing(8); row.addWidget(self._button("回包所选分区", self._repack, True)); row.addWidget(self._button("打开工作区", lambda: self._open_project("WORKSPACE"))); row.addStretch(); row.addWidget(QLabel("回包格式")); self.repack_target = QComboBox(); self.repack_target.addItems(["IMG", "DAT", "DAT.BR"]); row.addWidget(self.repack_target); self.sparse = QCheckBox("输出 Sparse"); row.addWidget(self.sparse); pl.addLayout(row); tabs.addTab(part_tab, "工作区分区")
+        super_tab = QWidget(); sl = QVBoxLayout(super_tab); sl.setContentsMargins(8, 8, 8, 8); sl.setSpacing(12)
+        self.super_table = self._table(["镜像", "来源", "大小"]); self.super_table.setMinimumHeight(260); sl.addWidget(self.super_table, 1)
+        row = QHBoxLayout(); row.setSpacing(8); row.addWidget(self._button("合成 super.img", self._repack_super, True)); row.addStretch(); row.addWidget(QLabel("类型")); self.super_type = QComboBox(); self.super_type.addItems(["A-only", "A/B", "Virtual A/B"]); row.addWidget(self.super_type); self.super_sparse = QCheckBox("Sparse 输出"); row.addWidget(self.super_sparse); sl.addLayout(row); tabs.addTab(super_tab, "合成 super")
+        bl.addStretch(0); layout.addWidget(box, 1)
+        logbox, ll = self._card("任务日志", "后台任务输出、工具链下载和校验结果"); prog = QHBoxLayout(); self.progress = QProgressBar(); self.progress.setRange(0, 0); self.progress.hide(); prog.addWidget(self.progress, 1); self.cancel_btn = self._button("取消任务", self._cancel); self.cancel_btn.setEnabled(False); prog.addWidget(self.cancel_btn); ll.addLayout(prog); self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(20000); self.log.setMinimumHeight(150); ll.addWidget(self.log); layout.addWidget(logbox)
         self.pages.addWidget(page)
 
     def _runtime_page(self):
@@ -534,8 +606,13 @@ class ArtWindow(QMainWindow):
                         ("RESIZE_IMG", "EXT4 压缩空间", ("0 · 否", "1 · 是")),
                         ("RESIZE_EROFSIMG", "EROFS 压缩算法", ("0 · 无", "1 · LZ4HC", "2 · LZ4")),
                         ("EROFS_LEVEL", "EROFS 压缩等级", tuple(str(i) for i in range(1, 13))),
+                        ("EROFS_OLD_KERNEL", "EROFS 旧内核兼容", ("0 · 否", "1 · 是")),
                         ("REPACK_BR_LEVEL", "BROTLI 等级", tuple(str(i) for i in range(10))),
-                        ("UNPACK_SPLIT_DAT", "DAT 分段数", ("5", "10", "15", "20", "30")))
+                        ("UNPACK_SPLIT_DAT", "DAT 分段数", ("5", "10", "15", "20", "30")),
+                        ("SUPER_SIZE", "SUPER 总大小", ("9126805504", "6710886400", "8589934592")),
+                        ("GROUP_NAME", "SUPER 分组名", ("qti_dynamic_partitions", "google_dynamic_partitions")),
+                        ("UTC", "镜像时间戳", ("LIVE", "0")),
+                        ("BOOT_SKIP_RAMDISK", "跳过 Ramdisk", ("0 · 否", "1 · 是")))
         values = self.controller.get_settings()
         for index, (key, title, choices) in enumerate(setting_defs):
             row, col = divmod(index, 2); form.addWidget(QLabel(title, objectName="muted"), row, col * 2)
@@ -561,7 +638,11 @@ class ArtWindow(QMainWindow):
         row = QHBoxLayout(); row.addWidget(self._button("导入 OTA ZIP", self._ota_import_zip)); row.addWidget(self._button("导入替换镜像", self._ota_import_images)); row.addStretch(); ol.addLayout(row)
         row = QHBoxLayout(); self.ota_key_status = QLabel(objectName="muted"); row.addWidget(self.ota_key_status, 1); self.ota_disable_avb = QCheckBox("禁用 AVB 修补"); row.addWidget(self.ota_disable_avb); row.addWidget(self._button("生成密钥", self._ota_generate)); row.addWidget(self._button("修补 OTA", self._ota_patch, True)); row.addWidget(self._button("验证 OTA", self._ota_verify, True)); ol.addLayout(row)
         self.ota_files = QPlainTextEdit(); self.ota_files.setReadOnly(True); self.ota_files.setMinimumHeight(110); ol.addWidget(self.ota_files); layout.addWidget(ota, 1)
+        plugins, pl = self._card("插件 / 子模块", "对应原版 CLI 的 sub 入口；插件只安装包含 run.sh 的 ZIP")
+        self.plugin_list = QListWidget(); self.plugin_list.setMinimumHeight(120); pl.addWidget(self.plugin_list)
+        row = QHBoxLayout(); row.addWidget(self._button("刷新插件", self._refresh_plugins)); row.addWidget(self._button("安装插件 ZIP", self._install_plugin)); row.addWidget(self._button("删除选中插件", self._remove_plugin)); row.addStretch(); pl.addLayout(row); layout.addWidget(plugins)
         self.pages.addWidget(page)
+        self._refresh_plugins()
 
     def _browse_avb(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择 AVB 镜像", filter="镜像 (*.img *.bin);;所有文件 (*.*)")
@@ -635,6 +716,31 @@ class ArtWindow(QMainWindow):
     def _ota_patch(self):
         project = self._require_project()
         if project: self._thread_call(lambda: self.controller.ota_patch(project, disable_avb=self.ota_disable_avb.isChecked()), "正在修补 OTA…")
+
+    def _refresh_plugins(self):
+        if not hasattr(self, "plugin_list"):
+            return
+        self.plugin_list.clear()
+        try:
+            for item in self.controller.list_plugins():
+                self.plugin_list.addItem(item["name"])
+        except Exception as error:
+            self.status.setText(str(error))
+
+    def _install_plugin(self):
+        path, _ = QFileDialog.getOpenFileName(self, "安装插件 ZIP", filter="插件 ZIP (*.zip)")
+        if path:
+            self._thread_call(lambda: self.controller.install_plugin(path), "正在安装插件…")
+
+    def _remove_plugin(self):
+        item = self.plugin_list.currentItem()
+        if not item:
+            QMessageBox.information(self, "选择插件", "请先选择要删除的插件。")
+            return
+        name = item.text()
+        answer = QMessageBox.question(self, "删除插件", f"确定删除插件 {name} 吗？", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._thread_call(lambda: self.controller.remove_plugin(name), "正在删除插件…")
 
     def _save_cli_settings(self):
         updates = {}
@@ -729,6 +835,19 @@ class ArtWindow(QMainWindow):
         try: self.controller.create_project(self.new_name.text()); self.new_name.clear(); self.refresh()
         except Exception as e: QMessageBox.critical(self, "创建工程失败", str(e))
 
+    def _delete_project(self):
+        project = self._require_project()
+        if not project: return
+        answer = QMessageBox.question(self, "删除工程", f"确定删除工程 {project} 及其输入、工作区和产物吗？", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.controller.delete_project(project)
+            self.status.setText(f"已删除工程：{project}")
+            self.refresh()
+        except Exception as error:
+            QMessageBox.critical(self, "删除工程失败", str(error))
+
     def _select_project(self):
         row = self.project_table.currentRow()
         if row >= 0: self.project_combo.setCurrentText(self.project_table.item(row, 0).text())
@@ -746,7 +865,9 @@ class ArtWindow(QMainWindow):
 
     def _extract(self):
         project = self._require_project(); rows = self.input_table.selectionModel().selectedRows(); paths = self._selected_inputs()
-        if not project or not paths:
+        if not project: return
+        if not paths:
+            QMessageBox.information(self, "选择输入", "请先在输入文件列表中选择要提取的文件。")
             return
         # Match the CLI's selective selectors when the chosen input is a
         # payload or super container.  Mixed selections stay batch based.
@@ -757,10 +878,16 @@ class ArtWindow(QMainWindow):
                 return
         self._start("extract", project=project, sources=paths, deep=self.deep.isChecked())
 
+    def _extract_selected_type(self):
+        """Run the selected batch extractor from the compact task selector."""
+        self._extract_format(self.extract_type.currentData())
+
     def _extract_format(self, requested):
         project = self._require_project(); maps = {"img": {"ext", "erofs", "sparse", "boot", "vendor_boot"}, "payload": {"payload"}, "dat": {"dat"}, "dat.br": {"dat.br"}, "win": {"win"}, "super": {"super"}}
         selected = [self.inputs[str(i.row())] for i in self.input_table.selectionModel().selectedRows() if str(i.row()) in self.inputs]; matches = [x for x in selected if x["format"] in maps[requested]] or [x for x in self.inputs.values() if x["format"] in maps[requested]]
         if not project or not matches:
+            if project:
+                QMessageBox.information(self, "没有匹配输入", f"INPUT 中没有可用的 {FORMAT_NAMES.get(requested, requested)} 文件。")
             return
         # The CLI lets users extract only selected logical partitions from a
         # payload/super container.  Ask for that selection here; other input
@@ -792,12 +919,11 @@ class ArtWindow(QMainWindow):
 
     def _choose_partitions(self, title, entries, label):
         """Return checked partition names, or None when the dialog is cancelled."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle(title)
-        dialog.setMinimumSize(430, 420)
-        layout = QVBoxLayout(dialog)
+        dialog = StyledDialog(self, title, (460, 500))
+        layout = dialog.body
         layout.addWidget(QLabel("请选择要提取的分区（默认全选）", objectName="muted"))
         listing = QListWidget()
+        listing.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         for entry in entries:
             name = entry.get("name") if isinstance(entry, dict) else str(entry)
             item = QListWidgetItem(label(entry) if isinstance(entry, dict) else str(entry), listing)
@@ -805,7 +931,9 @@ class ArtWindow(QMainWindow):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
         layout.addWidget(listing, 1)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("提取")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         if dialog.exec() != QDialog.Accepted:
@@ -815,11 +943,18 @@ class ArtWindow(QMainWindow):
 
     def _convert(self, target):
         project = self._require_project(); paths = self._selected_inputs()
-        if project and len(paths) == 1: self._start("convert", project=project, source=paths[0], target=target)
+        if not project: return
+        if len(paths) != 1:
+            QMessageBox.information(self, "选择一个文件", "转换操作一次只能选择一个镜像文件。")
+            return
+        self._start("convert", project=project, source=paths[0], target=target)
 
     def _repack(self):
         project = self._require_project(); rows = self.partition_table.selectionModel().selectedRows(); selection = [self.partition_table.item(i.row(), 0).text() for i in rows]
-        if not project or not selection: return
+        if not project: return
+        if not selection:
+            QMessageBox.information(self, "选择分区", "请先在工作区分区列表中选择要回包的分区。")
+            return
         options = self._repack_options(len(selection))
         if options is None: return
         params = {"project": project, "sparse": options.pop("sparse"), "target": {"IMG": "img", "DAT": "dat", "DAT.BR": "dat.br"}[self.repack_target.currentText()], **options}
@@ -831,7 +966,7 @@ class ArtWindow(QMainWindow):
         self._start(operation, **params)
 
     def _repack_options(self, count):
-        dialog = QDialog(self); dialog.setWindowTitle("回包参数"); form = QFormLayout(dialog); fs = QComboBox(); fs.addItems(["自动（按原始文件系统）", "EXT4", "EROFS"]); size = QComboBox(); size.addItems(["保留原始尺寸", "自动估算", "自定义 MiB"]); custom = QLineEdit(); comp = QComboBox(); comp.addItems(["lz4hc", "lz4", "zstd", "lzma"]); level = QSpinBox(); level.setRange(1, 12); level.setValue(9); sparse = QCheckBox("输出 Android Sparse 镜像"); form.addRow(QLabel(f"已选择 {count} 个分区")); form.addRow("文件系统", fs); form.addRow("镜像大小", size); form.addRow("自定义 MiB", custom); form.addRow("EROFS 压缩", comp); form.addRow("压缩等级", level); form.addRow(sparse); buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
+        dialog = StyledDialog(self, "回包参数", (480, 390)); form = QFormLayout(); fs = QComboBox(); fs.addItems(["自动（按原始文件系统）", "EXT4", "EROFS"]); size = QComboBox(); size.addItems(["保留原始尺寸", "自动估算", "自定义 MiB"]); custom = QLineEdit(); custom.setPlaceholderText("例如 4096"); comp = QComboBox(); comp.addItems(["lz4hc", "lz4", "zstd", "lzma"]); level = QSpinBox(); level.setRange(1, 12); level.setValue(9); sparse = QCheckBox("输出 Android Sparse 镜像"); form.addRow(QLabel(f"已选择 {count} 个分区", objectName="dialogHint")); form.addRow("文件系统", fs); form.addRow("镜像大小", size); form.addRow("自定义 MiB", custom); form.addRow("EROFS 压缩", comp); form.addRow("压缩等级", level); form.addRow(sparse); dialog.body.addLayout(form); buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel); buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确定"); buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消"); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); dialog.body.addWidget(buttons)
         if dialog.exec() != QDialog.Accepted: return None
         mode = {"自动（按原始文件系统）": "auto", "EXT4": "ext", "EROFS": "erofs"}[fs.currentText()]; image_size = "original" if size.currentText() == "保留原始尺寸" else "auto"
         if size.currentText() == "自定义 MiB":
@@ -843,7 +978,11 @@ class ArtWindow(QMainWindow):
         project = self._require_project(); rows = self.super_table.selectionModel().selectedRows(); sources = []
         for i in rows:
             name = self.super_table.item(i.row(), 0).text(); source = self.super_table.item(i.row(), 1).text(); sources.append(str(self.controller.root / project / source / name))
-        if project and sources: self._start("repack_super", project=project, sources=sources, super_type={"A-only": 0, "A/B": 1, "Virtual A/B": 2}[self.super_type.currentText()], sparse=self.super_sparse.isChecked())
+        if not project: return
+        if not sources:
+            QMessageBox.information(self, "选择镜像", "请先选择要合成 super.img 的镜像。")
+            return
+        self._start("repack_super", project=project, sources=sources, super_type={"A-only": 0, "A/B": 1, "Virtual A/B": 2}[self.super_type.currentText()], sparse=self.super_sparse.isChecked())
 
     def _thread_call(self, fn, message):
         if self.process is not None or self._thread_busy:
@@ -902,6 +1041,7 @@ class ArtWindow(QMainWindow):
                 self._thread_busy = False
                 self._busy(False)
                 self.refresh()
+                self._refresh_plugins()
                 if self.current_page == 3:
                     self._refresh_ota()
 

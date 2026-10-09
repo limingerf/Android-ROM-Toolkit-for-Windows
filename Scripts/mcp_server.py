@@ -39,6 +39,9 @@ TOOLS = [
     {"name": "art_ota_verify", "description": "使用 avbroot 验证 OTA 包签名。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "archive": {"type": "string"}}, "required": ["project"]}},
     {"name": "art_ota_generate_keys", "description": "为工程生成 AVB/OTA 密钥材料。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "passphrase": {"type": "string"}}, "required": ["project"]}},
     {"name": "art_ota_patch", "description": "使用 OTA_WORK/input-img 中的镜像修补选定 OTA 包。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "disable_avb": {"type": "boolean"}}, "required": ["project"]}},
+    {"name": "art_list_plugins", "description": "列出已安装的 CLI 插件/子模块。", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "art_install_plugin", "description": "安全安装包含 run.sh 的 CLI 插件 ZIP。", "inputSchema": {"type": "object", "properties": {"source": {"type": "string"}, "replace": {"type": "boolean"}}, "required": ["source"]}},
+    {"name": "art_remove_plugin", "description": "删除已安装的 CLI 插件。", "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
 ]
 
 
@@ -76,6 +79,9 @@ class McpServer:
             "art_ota_verify": lambda: self.controller.ota_verify(args.get("project", ""), args.get("archive")),
             "art_ota_generate_keys": lambda: self.controller.ota_generate_keys(args.get("project", ""), args.get("passphrase", "")),
             "art_ota_patch": lambda: self.controller.ota_patch(args.get("project", ""), disable_avb=args.get("disable_avb", False)),
+            "art_list_plugins": lambda: self.controller.list_plugins(),
+            "art_install_plugin": lambda: self.controller.install_plugin(args.get("source", ""), replace=args.get("replace", True)),
+            "art_remove_plugin": lambda: self.controller.remove_plugin(args.get("name", "")),
         }
         if name not in operations:
             raise ValueError(f"未知工具: {name}")
@@ -217,6 +223,18 @@ def main(root=None):
         @server.tool()
         def art_ota_patch(project: str, disable_avb: bool = False) -> dict:
             return controller.ota_patch(project, disable_avb=disable_avb)
+
+        @server.tool()
+        def art_list_plugins() -> list[dict]:
+            return controller.list_plugins()
+
+        @server.tool()
+        def art_install_plugin(source: str, replace: bool = True) -> dict:
+            return controller.install_plugin(source, replace=replace)
+
+        @server.tool()
+        def art_remove_plugin(name: str) -> dict:
+            return controller.remove_plugin(name)
 
         server.run(transport="stdio")
         return

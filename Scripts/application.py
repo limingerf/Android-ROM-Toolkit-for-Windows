@@ -278,6 +278,59 @@ class ArtController:
         return [{"name": path.name, "path": str(path), "size": path.stat().st_size}
                 for path in sorted(layout.out_dir.iterdir()) if path.is_file()]
 
+    def list_plugins(self) -> list[dict]:
+        """List installed CLI submodules without importing or executing them."""
+        root = self.root / "local" / "sub"
+        if not root.is_dir():
+            return []
+        result = []
+        for path in sorted(root.iterdir()):
+            if path.is_dir() and not path.is_symlink() and (path / "run.sh").is_file():
+                result.append({"name": path.name, "path": str(path), "entry": str(path / "run.sh")})
+        return result
+
+    def install_plugin(self, source: str, *, replace: bool = True) -> dict:
+        """Install a CLI plugin ZIP after validating its entry script and paths."""
+        import tempfile
+        import zipfile
+        from Scripts.Primary.Utils import safe_extract_zip
+        archive = self._require_file(source, "插件 ZIP")
+        if not zipfile.is_zipfile(archive):
+            raise ValueError("请选择有效的插件 ZIP")
+        plugin_root = self.root / "local" / "sub"
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in archive.stem).strip("._-") or "plugin"
+        name = safe_name if safe_name.startswith("DNA_") else "DNA_" + safe_name
+        ProjectLayout.validate_component(name, "插件")
+        with tempfile.TemporaryDirectory(prefix=".art-plugin-", dir=plugin_root) as temporary:
+            staged_root = Path(temporary)
+            with zipfile.ZipFile(archive) as handle:
+                safe_extract_zip(handle, staged_root)
+            entries = [path for path in staged_root.rglob("run.sh") if path.is_file()]
+            if len(entries) != 1:
+                raise ValueError("插件 ZIP 必须包含唯一的 run.sh")
+            staged = entries[0].parent
+            destination = plugin_root / name
+            if destination.exists() or destination.is_symlink():
+                if not replace:
+                    raise FileExistsError(f"插件已存在：{name}")
+                if destination.is_symlink() or not destination.is_dir():
+                    destination.unlink()
+                else:
+                    shutil.rmtree(destination)
+            shutil.copytree(staged, destination)
+        return {"name": name, "path": str(destination), "installed": True}
+
+    def remove_plugin(self, name: str) -> dict:
+        name = ProjectLayout.validate_component(name, "插件")
+        if not name.startswith("DNA_"):
+            raise ValueError("插件名称必须使用 DNA_ 前缀")
+        destination = self.root / "local" / "sub" / name
+        if not destination.is_dir() or destination.is_symlink():
+            raise FileNotFoundError(f"插件不存在：{name}")
+        shutil.rmtree(destination)
+        return {"name": name, "removed": True}
+
     # ---- AVB / OTA non-interactive helpers -----------------------------
     def _tool_capture(self, tool: str, args: list[str], *, cwd=None) -> dict:
         """Run a bundled host tool and return a stable GUI-friendly result."""
