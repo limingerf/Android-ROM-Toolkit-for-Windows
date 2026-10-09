@@ -15,5 +15,8 @@ build-call.log
 .art-build/
 .art-dist/
 .art-release/
+.art-native-tools/
+.art-v123-extract/
+.art-v124-extract/
 __pycache__/
 

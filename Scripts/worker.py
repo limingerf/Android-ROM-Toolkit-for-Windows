@@ -302,6 +302,12 @@ def _repack(controller, layout, stage, params):
         original_format = "ext"
     elif output_format == "erofs":
         original_format = "erofs"
+    if original_format == "ext" and V.toolchain.mode == "native" and not V.toolchain.resolve("e2fsck", required=False):
+        from Scripts.Platform.runtime import bootstrap_native_ext4_tools, detect_toolchain
+        print("缺少 Windows 原生 EXT4 校验工具，正在补齐工具和 DLL…", flush=True)
+        bootstrap_native_ext4_tools(controller.root, progress=lambda message: print(message, flush=True))
+        V.toolchain = detect_toolchain(controller.root)
+        V.toolchain.resolve("e2fsck")
     V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] = params.get("image_size", "auto")
     V.SETUP_MANIFEST.pop("REPACK_IMAGE_SIZE_BYTES", None)
     if V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] == "original":

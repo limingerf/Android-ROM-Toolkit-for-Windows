@@ -1,10 +1,8 @@
 """PAYLOAD - payload.bin OTA package patcher"""
 
-import os
-import subprocess
 from pathlib import Path
 
-from Scripts.Primary.Utils import V, BIN_PATH
+from Scripts.Primary.Utils import V
 
 YELLOW = '\x1b[1;33m'
 GREEN = '\x1b[1;32m'
@@ -19,13 +17,11 @@ KEY_FILES = ('avb.key', 'ota.key', 'avb_pkmd.bin', 'ota.crt')
 # OTA key management and avbroot command execution.
 def _run_avbroot(args, stdin_data=None):
     """Run avbroot with given args, optionally pipe stdin_data."""
-    command = V.toolchain.command(["avbroot", *args], bundled=True)
-    result = subprocess.run(
-        command,
+    result = V.toolchain.capture(
+        ["avbroot", *args],
         input=stdin_data,
         capture_output=True,
         text=True,
-        env=V.toolchain.environment(),
     )
     if result.stdout:
         print(result.stdout, end='')
@@ -231,13 +227,12 @@ def _list_input_imgs():
 
 def _get_ota_parts(zip_path):
     """Get partition list from OTA zip using avbroot ota list."""
-    avbroot = os.path.join(BIN_PATH, "avbroot")
-    result = subprocess.run(
-        [avbroot, 'ota', 'list', '--input', str(zip_path)],
+    result = V.toolchain.capture(
+        ['avbroot', 'ota', 'list', '--input', str(zip_path)],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        return []
+        raise RuntimeError(result.stderr or result.stdout or '无法读取源 OTA 分区列表')
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
@@ -256,6 +251,20 @@ def _build_patch_cmd(zip_path, kd, replace_parts, new_parts, super_names, disabl
     ota_key = kd / 'ota.key'
     ota_crt = kd / 'ota.crt'
     avb_key = kd / 'avb.key'
+
+    help_result = V.toolchain.capture(['avbroot', 'ota', 'patch', '--help'],
+                                     capture_output=True, text=True)
+    if help_result.returncode != 0:
+        raise RuntimeError(help_result.stderr or help_result.stdout or '无法读取 avbroot 支持的 OTA 参数')
+    help_text = (help_result.stdout or '') + (help_result.stderr or '')
+    if disable_avb and '--disable-avb' not in help_text:
+        raise ValueError('当前 avbroot 不支持禁用 AVB；请使用普通修补，或配置支持 --disable-avb 的扩展版')
+    if new_parts and '--add-partition' not in help_text:
+        raise ValueError('当前 avbroot 不支持添加 OTA 分区：' + '、'.join(item[0] for item in new_parts))
+    if super_names and '--super-mode' not in help_text:
+        raise ValueError('当前 avbroot 不支持 --super-mode；请配置支持添加逻辑分区的扩展版')
+    if not disable_avb and not avb_key.is_file():
+        raise FileNotFoundError('OTA 修补需要 avb.key，请先生成完整 OTA 密钥')
 
     pass_file = kd / 'passphrase.txt'
     pass_args = ['--pass-ota-file', str(pass_file)] if pass_file.is_file() else []
@@ -326,7 +335,12 @@ def _patch_ota_disable_avb():
         return
 
     # Get partitions already present in the OTA.
-    ota_parts = _get_ota_parts(zip_path)
+    try:
+        ota_parts = _get_ota_parts(zip_path)
+    except (RuntimeError, OSError) as error:
+        print(f'> {RED}{error}{CLOSE}')
+        input('> 按回车继续')
+        return
     ota_parts_set = set(ota_parts)
 
     # Classify partitions as replacements or additions.
@@ -354,7 +368,12 @@ def _patch_ota_disable_avb():
                 if name:
                     super_names.append(name)
 
-    cmd, output_name = _build_patch_cmd(zip_path, kd, replace_parts, new_parts, super_names, disable_avb=True)
+    try:
+        cmd, output_name = _build_patch_cmd(zip_path, kd, replace_parts, new_parts, super_names, disable_avb=True)
+    except (ValueError, RuntimeError, OSError) as error:
+        print(f'> {RED}{error}{CLOSE}')
+        input('> 按回车继续')
+        return
     cmd.extend(['--disable-avb', '--skip-system-ota-cert', '--rootless'])
 
     print(f'\n  输出: {output_name}')
@@ -414,7 +433,12 @@ def _patch_ota_with_avb():
         return
 
     # Get partitions already present in the OTA.
-    ota_parts = _get_ota_parts(zip_path)
+    try:
+        ota_parts = _get_ota_parts(zip_path)
+    except (RuntimeError, OSError) as error:
+        print(f'> {RED}{error}{CLOSE}')
+        input('> 按回车继续')
+        return
     ota_parts_set = set(ota_parts)
 
     # Classify partitions as replacements or additions.
@@ -442,7 +466,12 @@ def _patch_ota_with_avb():
                 if name:
                     super_names.append(name)
 
-    cmd, output_name = _build_patch_cmd(zip_path, kd, replace_parts, new_parts, super_names)
+    try:
+        cmd, output_name = _build_patch_cmd(zip_path, kd, replace_parts, new_parts, super_names)
+    except (ValueError, RuntimeError, OSError) as error:
+        print(f'> {RED}{error}{CLOSE}')
+        input('> 按回车继续')
+        return
     cmd.extend(['--rootless'])
 
     print(f'\n  输出: {output_name}')
@@ -591,8 +620,8 @@ def _ensure_ota_work_dirs():
 
 # Interactive payload/OTA maintenance menu.
 def main():
-    avbroot = os.path.join(BIN_PATH, "avbroot")
-    if not os.path.isfile(avbroot):
+    avbroot = V.toolchain.resolve('avbroot', required=False)
+    if not avbroot:
         print(f'\n{RED}> 未找到 avbroot 二进制: {avbroot}{CLOSE}')
         return
 

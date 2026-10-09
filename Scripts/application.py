@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,10 @@ class ArtController:
         config = self.root / "art-res" / "host-tools.local.json"
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(json.dumps({"backend": backend, "windows_tools": directory}, ensure_ascii=False, indent=2), encoding="utf-8")
+        # An explicit GUI/MCP choice also overrides an inherited environment
+        # variable for this process and its workers.
+        os.environ["ART_BACKEND"] = backend
+        os.environ["ART_WINDOWS_TOOLS"] = directory
         return self.toolchain_status()
 
     def bootstrap_tools(self, progress=None) -> dict:
@@ -335,10 +340,9 @@ class ArtController:
     def _tool_capture(self, tool: str, args: list[str], *, cwd=None) -> dict:
         """Run a bundled host tool and return a stable GUI-friendly result."""
         command = self.toolchain.command([tool, *[str(item) for item in args]], bundled=True)
-        process = subprocess.run(command, cwd=str(cwd) if cwd else None,
-                                 capture_output=True, text=True, encoding="utf-8",
-                                 errors="replace", env=self.toolchain.environment(),
-                                 **process_options())
+        process = self.toolchain.capture([tool, *[str(item) for item in args]],
+                                        cwd=str(cwd) if cwd else None,
+                                        capture_output=True, text=True)
         output = (process.stdout or "") + (process.stderr or "")
         return {"ok": process.returncode == 0, "code": process.returncode,
                 "command": command, "output": output.strip()}
@@ -369,36 +373,89 @@ class ArtController:
         target = Path(output).expanduser().resolve() if output else image_path.with_name(image_path.stem + "_unsign" + image_path.suffix)
         if target == image_path:
             raise ValueError("输出文件不能覆盖输入镜像，请指定新文件名")
-        target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(image_path, target)
-        result = self._tool_capture("avbtool", ["erase_footer", "--image", target])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".art-avb-", dir=target.parent) as stage_dir:
+            staged = Path(stage_dir) / target.name
+            shutil.copy2(image_path, staged)
+            result = self._tool_capture("avbtool", ["erase_footer", "--image", staged])
+            if not result["ok"]:
+                raise RuntimeError(result["output"] or f"avbtool 退出码 {result['code']}")
+            if not staged.is_file() or staged.stat().st_size == 0:
+                raise RuntimeError("AVB 操作未生成有效镜像")
+            os.replace(staged, target)
         result.update({"operation": "erase_footer", "image": str(image_path), "output": str(target)})
-        if not result["ok"]:
-            target.unlink(missing_ok=True)
-            raise RuntimeError(result["output"] or f"avbtool 退出码 {result['code']}")
         return result
 
     def avb_add_footer(self, image: str, *, kind: str = "hash", partition_name: str | None = None,
-                       partition_size: int | None = None, algorithm: str = "SHA256_RSA4096",
+                       partition_size: int | None = None, algorithm: str | None = None,
                        key: str | None = None, output: str | None = None,
                        rollback_index: int = 0) -> dict:
+        from Scripts.signing import resolve_avb_key, avb_algorithm_for_key
+
         image_path = self._require_file(image, "镜像")
         if kind not in {"hash", "hashtree"}: raise ValueError("签名类型必须是 hash 或 hashtree")
-        key_path = self._require_file(key, "AVB 密钥") if key else None
+        key_path = self._require_file(resolve_avb_key(key), "AVB 密钥") if key else None
+        algorithm = algorithm or avb_algorithm_for_key(str(key_path) if key_path else None)
+        if algorithm != "NONE" and key_path is None:
+            raise ValueError("使用 RSA 签名算法时必须选择 AVB 密钥")
+        if partition_size is not None and int(partition_size) <= 0:
+            raise ValueError("分区大小必须大于零")
+        if int(rollback_index) < 0:
+            raise ValueError("回滚索引不能为负数")
         target = Path(output).expanduser().resolve() if output else image_path.with_name(image_path.stem + "_signed" + image_path.suffix)
         if target == image_path: raise ValueError("输出文件不能覆盖输入镜像，请指定新文件名")
-        target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(image_path, target)
         part = partition_name or image_path.stem
+        command = "add_hash_footer" if kind == "hash" else "add_hashtree_footer"
+        args = [command, "--image", target, "--partition_name", part, "--algorithm", algorithm]
+        fec_args = ["--do_not_generate_fec"] if kind == "hashtree" and self.toolchain.mode == "native" else []
+        args.extend(fec_args)
         if partition_size is None:
-            partition_size = ((target.stat().st_size + (69632 if kind == "hash" else 0) + 4095) // 4096) * 4096
-        args = ["add_hash_footer" if kind == "hash" else "add_hashtree_footer", "--image", target,
-                "--partition_name", part, "--algorithm", algorithm, "--partition_size", int(partition_size)]
-        if key_path: args.extend(["--key", key_path])
+            # Sparse files have a much larger logical size than their ZIP-like
+            # container. AVB reserves must be calculated from that logical size.
+            image_size = image_path.stat().st_size
+            with image_path.open("rb") as source:
+                header = source.read(28)
+            if len(header) == 28 and struct.unpack_from("<I", header)[0] == 0xed26ff3a:
+                block_size, blocks = struct.unpack_from("<II", header, 12)
+                image_size = block_size * blocks
+            if kind == "hash":
+                help_result = self._tool_capture("avbtool", [command, "--help"])
+                if help_result["ok"] and "--dynamic_partition_size" in help_result["output"]:
+                    args.append("--dynamic_partition_size")
+                else:
+                    partition_size = ((image_size + 69632 + 4095) // 4096) * 4096
+            else:
+                partition_size = ((image_size + max(69632, image_size // 32) + 4095) // 4096) * 4096
+                for _ in range(8):
+                    sizing = self._tool_capture("avbtool", [command, "--partition_size", str(partition_size), "--calc_max_image_size", *fec_args])
+                    numbers = [int(line.strip()) for line in sizing["output"].splitlines() if line.strip().isdigit()]
+                    if not sizing["ok"] or not numbers or numbers[-1] <= 0:
+                        raise RuntimeError(sizing["output"] or "无法计算 AVB 哈希树所需分区大小")
+                    if numbers[-1] >= image_size:
+                        break
+                    partition_size += ((image_size - numbers[-1] + 69632 + 4095) // 4096) * 4096
+                else:
+                    raise RuntimeError("无法为 AVB 哈希树预留足够空间，请指定分区大小")
+        if partition_size is not None:
+            args.extend(["--partition_size", int(partition_size)])
+        if key_path:
+            args.extend(["--key", key_path])
+            pass_file = key_path.parent / "passphrase.txt"
+            if pass_file.is_file():
+                args.extend(["--pass-file", pass_file])
         if kind == "hash": args.extend(["--rollback_index", int(rollback_index)])
-        result = self._tool_capture("avbtool", args)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".art-avb-", dir=target.parent) as stage_dir:
+            staged = Path(stage_dir) / target.name
+            shutil.copy2(image_path, staged)
+            args[args.index("--image") + 1] = staged
+            result = self._tool_capture("avbtool", args)
+            if not result["ok"]:
+                raise RuntimeError(result["output"] or f"avbtool 退出码 {result['code']}")
+            if not staged.is_file() or staged.stat().st_size == 0:
+                raise RuntimeError("AVB 操作未生成有效镜像")
+            os.replace(staged, target)
         result.update({"operation": "add_" + kind + "_footer", "image": str(image_path), "output": str(target)})
-        if not result["ok"]:
-            target.unlink(missing_ok=True)
-            raise RuntimeError(result["output"] or f"avbtool 退出码 {result['code']}")
         return result
 
     def ota_status(self, project: str) -> dict:
@@ -426,18 +483,23 @@ class ArtController:
     def ota_generate_keys(self, project: str, passphrase: str = "") -> dict:
         layout = self._layout(project); key_dir = layout.ota_signkey_dir; key_dir.mkdir(parents=True, exist_ok=True)
         pass_file = key_dir / "passphrase.txt"
-        if passphrase: pass_file.write_text(passphrase, encoding="utf-8")
-        else: pass_file.unlink(missing_ok=True)
-        pf = ["--pass-file", pass_file] if pass_file.is_file() else []
+        # An explicit empty file requests unencrypted keys without asking the
+        # windowed GUI process to answer an interactive password prompt.
+        pass_file.write_text(passphrase, encoding="utf-8")
+        pf = ["--pass-file", pass_file]
         commands = [
             (["key", "generate-key", "-t", "rsa4096", "-o", key_dir / "avb.key"] + pf),
             (["key", "generate-key", "-t", "rsa4096", "-o", key_dir / "ota.key"] + pf),
             (["key", "encode-avb", "-k", key_dir / "avb.key", "-o", key_dir / "avb_pkmd.bin"] + pf),
             (["key", "generate-cert", "-k", key_dir / "ota.key", "-o", key_dir / "ota.crt"] + pf),]
         results = []
-        for args in commands:
-            result = self._tool_capture("avbroot", args, cwd=layout.ota_work_dir); results.append(result)
-            if not result["ok"]: raise RuntimeError(result["output"] or f"avbroot 退出码 {result['code']}")
+        try:
+            for args in commands:
+                result = self._tool_capture("avbroot", args, cwd=layout.ota_work_dir); results.append(result)
+                if not result["ok"]: raise RuntimeError(result["output"] or f"avbroot 退出码 {result['code']}")
+        finally:
+            if not passphrase:
+                pass_file.unlink(missing_ok=True)
         return {"results": results, **self.ota_status(project)}
 
     def ota_verify(self, project: str, archive: str | None = None) -> dict:
@@ -463,8 +525,21 @@ class ArtController:
         if not images: raise FileNotFoundError("OTA_WORK/input-img 内没有 .img 文件")
         key_dir = layout.ota_signkey_dir; ota_key = key_dir / "ota.key"; ota_crt = key_dir / "ota.crt"; avb_key = key_dir / "avb.key"
         if not ota_key.is_file() or not ota_crt.is_file(): raise FileNotFoundError("请先生成 OTA 密钥")
+        help_result = self._tool_capture("avbroot", ["ota", "patch", "--help"], cwd=layout.ota_work_dir)
+        if not help_result["ok"]:
+            raise RuntimeError(help_result["output"] or "无法读取 avbroot 支持的 OTA 参数")
+        help_text = help_result["output"]
+        if disable_avb and "--disable-avb" not in help_text:
+            raise ValueError("当前 Windows 原生 avbroot 不支持禁用 AVB 修补；请取消该选项，或配置支持 --disable-avb 的 avbroot 扩展版")
+        if not disable_avb and not avb_key.is_file():
+            raise FileNotFoundError("OTA 修补需要 avb.key，请先生成完整 OTA 密钥")
         listing = self._tool_capture("avbroot", ["ota", "list", "--input", zip_path], cwd=layout.ota_work_dir)
-        existing = set(listing["output"].splitlines()) if listing["ok"] else set()
+        if not listing["ok"]:
+            raise RuntimeError(listing["output"] or "无法读取源 OTA 分区列表")
+        existing = {line.strip() for line in listing["output"].splitlines() if line.strip()}
+        added = [image.stem for image in images if image.stem not in existing]
+        if added and "--add-partition" not in help_text:
+            raise ValueError("当前 Windows 原生 avbroot 不支持添加 OTA 分区：" + "、".join(added) + "；请仅导入源 OTA 已有分区，或配置支持 --add-partition 的扩展版")
         output = layout.ota_work_dir / (zip_path.stem + "_signed.zip")
         args = ["ota", "patch", "--input", zip_path, "--output", output, "--key-ota", ota_key, "--cert-ota", ota_crt, "--rootless"]
         pass_file = key_dir / "passphrase.txt"
@@ -476,8 +551,16 @@ class ArtController:
             part = image.stem
             args.extend(["--replace" if part in existing else "--add-partition", part, image])
         if disable_avb: args.extend(["--disable-avb", "--skip-system-ota-cert"])
-        result = self._tool_capture("avbroot", args, cwd=layout.ota_work_dir); result.update({"archive": str(output), "disabled_avb": disable_avb})
-        if not result["ok"]: raise RuntimeError(result["output"] or f"avbroot 退出码 {result['code']}")
+        with tempfile.TemporaryDirectory(prefix=".art-ota-", dir=layout.ota_work_dir) as stage_dir:
+            staged = Path(stage_dir) / output.name
+            args[args.index("--output") + 1] = staged
+            result = self._tool_capture("avbroot", args, cwd=layout.ota_work_dir)
+            if not result["ok"]:
+                raise RuntimeError(result["output"] or f"avbroot 退出码 {result['code']}")
+            if not staged.is_file() or staged.stat().st_size == 0:
+                raise RuntimeError("OTA 修补未生成有效 ZIP 文件")
+            os.replace(staged, output)
+        result.update({"archive": str(output), "disabled_avb": disable_avb})
         return result
 
     def job_request(self, operation: str, **params) -> dict:
@@ -485,11 +568,14 @@ class ArtController:
             raise ValueError("未知操作")
         if "project" in params:
             params["project"] = str(self._layout(params["project"]).project_dir)
-        return {"root": str(self.root), "operation": operation, "params": params}
+        self.toolchain = detect_toolchain(self.root)
+        return {"root": str(self.root), "operation": operation, "params": params,
+                "backend": self.toolchain.mode}
 
     def start_job(self, request: dict):
         env = os.environ.copy()
         env["PYTHONUTF8"] = "1"
+        env["ART_BACKEND"] = request.get("backend", detect_toolchain(request["root"]).mode)
         process = subprocess.Popen(worker_command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
                                    env=env, cwd=ROOT, **process_options())

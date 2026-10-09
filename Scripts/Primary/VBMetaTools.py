@@ -2,11 +2,9 @@
 
 import os
 import shutil
-import subprocess
 from Scripts.Primary.Utils import clear_console
 
 from Scripts.Primary.Utils import V, BIN_PATH
-from Scripts.Platform.runtime import process_options
 
 YELLOW = '\x1b[1;33m'
 GREEN = '\x1b[1;32m'
@@ -26,8 +24,7 @@ def _avb_command(args):
 
 
 def _run_capture(args):
-    return subprocess.run(_avb_command(args), capture_output=True, text=True,
-                          env=V.toolchain.environment(), **process_options())
+    return V.toolchain.capture(["avbtool", *args], capture_output=True, text=True)
 
 
 # AVB command execution and signing-key path helpers.
@@ -134,6 +131,9 @@ def _sign_footer(cmd_name, img, trim_zeros=True):
     part_name = input('\n  分区名（留空用文件名）>> ').strip() or os.path.splitext(os.path.basename(img))[0]
 
     pass_path = _pass_file_path()
+    fec_args = ['--do_not_generate_fec'] if cmd_name == 'add_hashtree_footer' and V.toolchain.mode == 'native' else []
+    if fec_args:
+        print('  Windows 原生哈希树签名：不生成 FEC 纠错数据')
     # partition_size: use the user value, or calculate it automatically.
     ps_input = input('  分区大小（字节），留空自动计算 >> ').strip()
     import math
@@ -148,18 +148,26 @@ def _sign_footer(cmd_name, img, trim_zeros=True):
             '--algorithm', 'SHA256_RSA4096', '--key', key_path,
             '--partition_size', str(trial_ps)] +
             (['--pass-file', pass_path] if pass_path else []) +
-            ['--calc_max_image_size'],
-            capture_output=True, text=True)
+            ['--calc_max_image_size'] + fec_args)
         max_img = int(r.stdout.strip()) if r.stdout.strip().isdigit() else 0
+        if r.returncode != 0 or max_img <= 0:
+            print(f'\n  {RED}> 无法计算哈希树分区大小：{r.stderr or r.stdout}{CLOSE}')
+            os.remove(out_img)
+            input('> 按回车继续')
+            return
         aligned_ps = str(math.ceil(img_size / max_img * trial_ps / 4096) * 4096)
         r2 = _run_capture(['add_hashtree_footer',
             '--image', out_img, '--partition_name', part_name,
             '--algorithm', 'SHA256_RSA4096', '--key', key_path,
             '--partition_size', aligned_ps] +
             (['--pass-file', pass_path] if pass_path else []) +
-            ['--calc_max_image_size'],
-            capture_output=True, text=True)
+            ['--calc_max_image_size'] + fec_args)
         max_img2 = int(r2.stdout.strip()) if r2.stdout.strip().isdigit() else 0
+        if r2.returncode != 0 or max_img2 <= 0:
+            print(f'\n  {RED}> 无法计算哈希树分区大小：{r2.stderr or r2.stdout}{CLOSE}')
+            os.remove(out_img)
+            input('> 按回车继续')
+            return
         if max_img2 < img_size:
             aligned_ps = str(math.ceil(img_size / max_img2 * int(aligned_ps) / 4096) * 4096)
     else:
@@ -169,6 +177,7 @@ def _sign_footer(cmd_name, img, trim_zeros=True):
     args = [cmd_name, '--image', out_img, '--partition_name', part_name,
             '--algorithm', 'SHA256_RSA4096', '--key', key_path,
             '--partition_size', aligned_ps]
+    args.extend(fec_args)
     if pass_path:
         args.extend(['--pass-file', pass_path])
     # rollback_index: prompt for hash footer; omit it for hashtree footer.
@@ -215,8 +224,7 @@ def cmd_verify_image():
     # Omit --key so avbtool extracts the public key from the image for verification.
     # Avoid compatibility issues where newer avbtool cannot read avb_pkmd.bin with OpenSSL 3.x.
     result = _run_capture(['verify_image', '--image', img])
-    output = result.stdout + result.stderr
-    if 'Successfully verified' in output:
+    if result.returncode == 0:
         print('\n  验证通过。')
     else:
         print(f'\n  {RED}> 验证失败{CLOSE}')

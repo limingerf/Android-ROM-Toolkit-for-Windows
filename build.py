@@ -42,7 +42,7 @@ def copy_release_resources(release_dir: Path) -> None:
         if icon_source.is_file():
             shutil.copy2(icon_source, resource_target / icon_source.name)
 
-    for filename in ('setting.ini', 'LICENSE', 'README.md', 'ATTRIBUTIONS.md'):
+    for filename in ('setting.ini', 'LICENSE', 'README.md', 'ATTRIBUTIONS.md', 'AVBTOOL_LICENSE.txt'):
         source = ROOT / filename
         if source.is_file():
             shutil.copy2(source, release_dir / filename)
@@ -97,12 +97,16 @@ def main() -> None:
          '--icon', str(ROOT / 'assets' / 'android-rom-toolkit.ico'),
          '--add-data', f"{ROOT / 'assets' / 'android-rom-toolkit.ico'};assets",
          '--add-data', f"{ROOT / 'assets' / 'android-rom-toolkit.png'};assets",
+         '--add-data', f"{ROOT / 'assets' / 'keys'};assets/keys",
          '--distpath', str(DIST_DIR),
          '--workpath', str(BUILD_DIR),
          '--specpath', str(BUILD_DIR),
          '--runtime-hook', str(ROOT / 'pyinstaller_hooks' / 'qt_icu_runtime.py'),
          '--exclude-module', 'numpy',
          '--hidden-import', 'Scripts.mcp_server',
+         '--hidden-import', 'Scripts.avbtool_windows',
+         '--hidden-import', 'Scripts.vendor.avbtool',
+         '--hidden-import', 'cryptography.hazmat.primitives.asymmetric.rsa',
          '--hidden-import', 'mcp.server.fastmcp',
          '--hidden-import', 'PySide6.QtCore',
          '--hidden-import', 'PySide6.QtGui',

@@ -15,14 +15,14 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, QEvent, QPoint
-from PySide6.QtGui import QAction, QIcon, QFont, QPixmap, QDesktopServices, QRegion, QPainterPath
+from PySide6.QtGui import QAction, QIcon, QFont, QPixmap, QDesktopServices, QRegion, QPainterPath, QPalette, QColor
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget, QHeaderView,
-    QScrollArea, QSizePolicy, QAbstractItemView,
+    QScrollArea, QSizePolicy, QAbstractItemView, QStyledItemDelegate,
 )
 from PySide6.QtCore import QUrl, QRectF
 
@@ -44,6 +44,26 @@ def size_text(size):
         if value < 1024 or unit == "TiB":
             return f"{value:.1f} {unit}"
         value /= 1024
+
+
+class StyledComboBox(QComboBox):
+    """Use item-view painting so popup rows follow the application's theme."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Fusion's default combo menu delegate paints rows using menu palette
+        # roles and bypasses item selectors in the workbench stylesheet.
+        view = self.view()
+        self.setItemDelegate(QStyledItemDelegate(view))
+
+    def showPopup(self):
+        view = self.view()
+        view.ensurePolished()
+        # Include the stylesheet's row padding and popup frame; otherwise a
+        # short combo such as the theme selector elides even two characters.
+        view.setMinimumWidth(max(self.width(), view.sizeHintForColumn(0)
+                                 + 2 * view.frameWidth() + 8))
+        super().showPopup()
 
 
 class EventBridge(QObject):
@@ -336,7 +356,31 @@ class ArtWindow(QMainWindow):
     def _apply_style(self):
         # Fusion uses Qt's cross-platform controls and lets DWM composite one
         # backing store instead of hundreds of child windows.
-        QApplication.instance().setStyle("Fusion")
+        app = QApplication.instance()
+        app.setStyle("Fusion")
+        dark = self.ui_theme == "dark"
+        palette = QPalette()
+        colors = {
+            QPalette.ColorRole.Window: "#101721" if dark else "#eef3fb",
+            QPalette.ColorRole.WindowText: "#ecf2fc" if dark else "#142238",
+            QPalette.ColorRole.Base: "#172235" if dark else "#f8fbff",
+            QPalette.ColorRole.AlternateBase: "#1d293d" if dark else "#f3f7fd",
+            QPalette.ColorRole.Text: "#ecf2fc" if dark else "#142238",
+            QPalette.ColorRole.Button: "#223653" if dark else "#eef3fb",
+            QPalette.ColorRole.ButtonText: "#ecf2fc" if dark else "#1c355b",
+            QPalette.ColorRole.Highlight: "#294a72" if dark else "#d7e7ff",
+            QPalette.ColorRole.HighlightedText: "#eff6ff" if dark else "#173c70",
+            QPalette.ColorRole.ToolTipBase: "#172235" if dark else "#f7faff",
+            QPalette.ColorRole.ToolTipText: "#ecf2fc" if dark else "#142238",
+            QPalette.ColorRole.PlaceholderText: "#95a8c3" if dark else "#6c7d96",
+        }
+        for role, color in colors.items():
+            palette.setColor(role, QColor(color))
+        for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text,
+                     QPalette.ColorRole.ButtonText, QPalette.ColorRole.HighlightedText):
+            palette.setColor(QPalette.ColorGroup.Disabled, role,
+                             QColor("#7487a3" if dark else "#8292aa"))
+        app.setPalette(palette)
         sheet = """
             * { font-family: 'Microsoft YaHei UI'; font-size: 10pt; }
             QWidget { color: #142238; }
@@ -380,10 +424,11 @@ class ArtWindow(QMainWindow):
             QListWidget#nav::item:selected { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d4e3ff, stop:1 #dff4f3); color: #173c70; font-weight: 700; }
             QLineEdit, QComboBox, QSpinBox { background: rgba(255,255,255,235); border: 1px solid #c4d1e5; border-radius: 7px; padding: 6px; selection-background-color: #8eb2ee; }
             QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #638bd2; }
-            QComboBox QAbstractItemView, QListWidget { background: #f8fbff; border: 1px solid #c9d9ef; border-radius: 9px; padding: 4px; outline: 0; }
-            QListWidget::item { padding: 8px 10px; border-radius: 7px; }
-            QListWidget::item:hover { background: #e7f0ff; }
-            QListWidget::item:selected { background: #d7e7ff; color: #173c70; }
+            QAbstractItemView { color: #142238; selection-background-color: #d7e7ff; selection-color: #173c70; }
+            QComboBox QAbstractItemView, QListWidget { background: #f8fbff; color: #142238; border: 1px solid #c9d9ef; border-radius: 9px; padding: 4px; outline: 0; selection-background-color: #d7e7ff; selection-color: #173c70; }
+            QComboBox QAbstractItemView::item, QListWidget::item { padding: 8px 10px; border-radius: 7px; }
+            QComboBox QAbstractItemView::item:hover, QListWidget::item:hover { background: #e7f0ff; color: #142238; }
+            QComboBox QAbstractItemView::item:selected, QListWidget::item:selected { background: #d7e7ff; color: #173c70; }
             QTableWidget { background: rgba(255,255,255,220); alternate-background-color: #f3f7fd; border: 1px solid #cedbeb; border-radius: 9px; gridline-color: #e3eaf3; selection-background-color: #d5e6ff; selection-color: #173c70; }
             QHeaderView::section { background: #e6edf7; padding: 8px; border: 0; font-weight: 650; color: #365174; }
             QPlainTextEdit { background: #f2f6fb; border: 1px solid #cedbeb; border-radius: 8px; font-family: Consolas; }
@@ -420,19 +465,24 @@ class ArtWindow(QMainWindow):
                 QPushButton { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #223653, stop:1 #1a3039); color: #ecf2fc; border-color: #3c526f; }
                 QPushButton:pressed { background: #14243b; }
                 QPushButton:hover { background: #263d60; }
+                QPushButton:disabled { color: #7487a3; background: #1b283a; border-color: #33415a; }
+                QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { color: #7487a3; }
+                QListWidget#nav::item { color: #aebed5; }
+                QListWidget#nav::item:hover { background: #263d60; color: #ecf2fc; }
                 QListWidget#nav::item:selected { background: #294467; color: #f4f8ff; }
                 QPlainTextEdit { background: #101925; color: #cbd9ef; border-color: #33415a; }
-                QTableWidget { alternate-background-color: #1d293d; gridline-color: #2a3850; }
+                QTableWidget { alternate-background-color: #1d293d; gridline-color: #2a3850; selection-background-color: #294a72; selection-color: #eff6ff; }
                 QHeaderView::section { background: #202e44; color: #c8d8ef; }
                 QTabBar::tab:selected { background: #294a72; color: #eff6ff; }
                 QTabWidget::pane { border-color: #324860; background: rgba(20,31,46,140); }
-                QComboBox QAbstractItemView, QListWidget { background: #172235; border-color: #38506e; }
-                QListWidget::item:hover { background: #263d60; }
-                QListWidget::item:selected { background: #294a72; color: #eff6ff; }
+                QAbstractItemView { color: #ecf2fc; selection-background-color: #294a72; selection-color: #eff6ff; }
+                QComboBox QAbstractItemView, QListWidget { background: #172235; color: #ecf2fc; border-color: #38506e; selection-background-color: #294a72; selection-color: #eff6ff; }
+                QComboBox QAbstractItemView::item:hover, QListWidget::item:hover { background: #263d60; color: #ecf2fc; }
+                QComboBox QAbstractItemView::item:selected, QListWidget::item:selected { background: #294a72; color: #eff6ff; }
                 QCheckBox { color: #aebed5; }
                 QSplitter::handle { background: #2f4158; }
             """
-        QApplication.instance().setStyleSheet(sheet)
+        app.setStyleSheet(sheet)
 
     def _settings_path(self):
         path = self.controller.root / "art-res" / "ui-settings.json"
@@ -500,7 +550,7 @@ class ArtWindow(QMainWindow):
         titles.addWidget(self.page_title); titles.addWidget(self.page_subtitle)
         header.addLayout(titles); header.addStretch()
         header.addWidget(QLabel("当前工程"))
-        self.project_combo = QComboBox()
+        self.project_combo = StyledComboBox()
         self.project_combo.setMinimumWidth(190)
         self.project_combo.currentTextChanged.connect(self._project_changed)
         header.addWidget(self.project_combo)
@@ -621,13 +671,13 @@ class ArtWindow(QMainWindow):
         input_tab = QWidget(); il = QVBoxLayout(input_tab); il.setContentsMargins(8, 8, 8, 8); il.setSpacing(12)
         self.input_table = self._table(["文件", "格式", "大小"]); self.input_table.setMinimumHeight(240); il.addWidget(self.input_table, 1); il.addLayout(self._selection_bar(self.input_table, "输入文件"))
         action_row = QHBoxLayout(); action_row.setSpacing(8); action_row.addWidget(self._button("提取所选", self._extract, True)); self.deep = QCheckBox("Payload / super 继续解包内部 IMG"); self.deep.setChecked(True); action_row.addWidget(self.deep); action_row.addStretch(); action_row.addWidget(self._button("转为 Sparse", lambda: self._convert("sparse"))); action_row.addWidget(self._button("转为 RAW", lambda: self._convert("raw"))); il.addLayout(action_row)
-        format_row = QHBoxLayout(); format_row.setSpacing(8); format_row.addWidget(QLabel("批量解包类型", objectName="muted")); self.extract_type = QComboBox(); self.extract_type.addItem("IMG / Sparse / Boot", "img"); self.extract_type.addItem("Payload.bin", "payload"); self.extract_type.addItem("new.dat", "dat"); self.extract_type.addItem("new.dat.br", "dat.br"); self.extract_type.addItem("WIN 分片", "win"); self.extract_type.addItem("super.img", "super"); format_row.addWidget(self.extract_type, 1); format_row.addWidget(self._button("按类型提取", self._extract_selected_type, True)); il.addLayout(format_row); tabs.addTab(input_tab, "输入文件")
+        format_row = QHBoxLayout(); format_row.setSpacing(8); format_row.addWidget(QLabel("批量解包类型", objectName="muted")); self.extract_type = StyledComboBox(); self.extract_type.addItem("IMG / Sparse / Boot", "img"); self.extract_type.addItem("Payload.bin", "payload"); self.extract_type.addItem("new.dat", "dat"); self.extract_type.addItem("new.dat.br", "dat.br"); self.extract_type.addItem("WIN 分片", "win"); self.extract_type.addItem("super.img", "super"); format_row.addWidget(self.extract_type, 1); format_row.addWidget(self._button("按类型提取", self._extract_selected_type, True)); il.addLayout(format_row); tabs.addTab(input_tab, "输入文件")
         part_tab = QWidget(); pl = QVBoxLayout(part_tab); pl.setContentsMargins(8, 8, 8, 8); pl.setSpacing(12)
         self.partition_table = self._table(["分区", "原文件系统"]); self.partition_table.setMinimumHeight(300); pl.addWidget(self.partition_table, 1); pl.addLayout(self._selection_bar(self.partition_table, "工作区分区"))
-        row = QHBoxLayout(); row.setSpacing(8); row.addWidget(self._button("回包所选分区", self._repack, True)); row.addWidget(self._button("打开工作区", lambda: self._open_project("WORKSPACE"))); row.addStretch(); row.addWidget(QLabel("回包格式")); self.repack_target = QComboBox(); self.repack_target.addItems(["IMG", "DAT", "DAT.BR"]); row.addWidget(self.repack_target); self.sparse = QCheckBox("输出 Sparse"); row.addWidget(self.sparse); pl.addLayout(row); tabs.addTab(part_tab, "工作区分区")
+        row = QHBoxLayout(); row.setSpacing(8); row.addWidget(self._button("回包所选分区", self._repack, True)); row.addWidget(self._button("打开工作区", lambda: self._open_project("WORKSPACE"))); row.addStretch(); row.addWidget(QLabel("回包格式")); self.repack_target = StyledComboBox(); self.repack_target.addItems(["IMG", "DAT", "DAT.BR"]); row.addWidget(self.repack_target); self.sparse = QCheckBox("输出 Sparse"); row.addWidget(self.sparse); pl.addLayout(row); tabs.addTab(part_tab, "工作区分区")
         super_tab = QWidget(); sl = QVBoxLayout(super_tab); sl.setContentsMargins(8, 8, 8, 8); sl.setSpacing(12)
         self.super_table = self._table(["镜像", "来源", "大小"]); self.super_table.setMinimumHeight(260); sl.addWidget(self.super_table, 1); sl.addLayout(self._selection_bar(self.super_table, "super 镜像"))
-        row = QHBoxLayout(); row.setSpacing(8); row.addWidget(self._button("合成 super.img", self._repack_super, True)); row.addStretch(); row.addWidget(QLabel("类型")); self.super_type = QComboBox(); self.super_type.addItems(["A-only", "A/B", "Virtual A/B"]); row.addWidget(self.super_type); self.super_sparse = QCheckBox("Sparse 输出"); row.addWidget(self.super_sparse); sl.addLayout(row); tabs.addTab(super_tab, "合成 super")
+        row = QHBoxLayout(); row.setSpacing(8); row.addWidget(self._button("合成 super.img", self._repack_super, True)); row.addStretch(); row.addWidget(QLabel("类型")); self.super_type = StyledComboBox(); self.super_type.addItems(["A-only", "A/B", "Virtual A/B"]); row.addWidget(self.super_type); self.super_sparse = QCheckBox("Sparse 输出"); row.addWidget(self.super_sparse); sl.addLayout(row); tabs.addTab(super_tab, "合成 super")
         bl.addStretch(0); layout.addWidget(box, 1)
         logbox, ll = self._card("任务日志", "后台任务输出、工具链下载和校验结果"); prog = QHBoxLayout(); self.progress = QProgressBar(); self.progress.setRange(0, 0); self.progress.hide(); prog.addWidget(self.progress, 1); self.cancel_btn = self._button("取消任务", self._cancel); self.cancel_btn.setEnabled(False); prog.addWidget(self.cancel_btn); ll.addLayout(prog); self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(20000); self.log.setMinimumHeight(150); ll.addWidget(self.log); layout.addWidget(logbox)
         self.pages.addWidget(page)
@@ -635,9 +685,9 @@ class ArtWindow(QMainWindow):
     def _runtime_page(self):
         page = QWidget(); layout = QVBoxLayout(page)
         box, bl = self._card("界面外观", "Qt 使用系统级窗口合成；浅色主题为默认")
-        row = QHBoxLayout(); row.addWidget(QLabel("主题")); self.theme = QComboBox(); self.theme.addItems(["浅色", "深色"]); self.theme.setCurrentText("深色" if self.ui_theme == "dark" else "浅色"); self.theme.currentTextChanged.connect(self._change_theme); row.addWidget(self.theme); row.addStretch(); bl.addLayout(row); layout.addWidget(box)
+        row = QHBoxLayout(); row.addWidget(QLabel("主题")); self.theme = StyledComboBox(); self.theme.addItems(["浅色", "深色"]); self.theme.setCurrentText("深色" if self.ui_theme == "dark" else "浅色"); self.theme.currentTextChanged.connect(self._change_theme); row.addWidget(self.theme); row.addStretch(); bl.addLayout(row); layout.addWidget(box)
         box, bl = self._card("运行后端", "Windows 原生无需 WSL；缺失工具可自动补齐")
-        row = QHBoxLayout(); self.backend = QComboBox(); self.backend.addItems(["native", "wsl"]); self.tool_dir = QLineEdit(); row.addWidget(self.backend); row.addWidget(self.tool_dir, 1); row.addWidget(self._button("浏览", self._browse_tools)); row.addWidget(self._button("保存配置", self._save_tools, True)); bl.addLayout(row); self.backend_label = QLabel(objectName="muted"); bl.addWidget(self.backend_label); bl.addWidget(self._button("自动补齐 Windows 工具", self._bootstrap_tools)); layout.addWidget(box)
+        row = QHBoxLayout(); self.backend = StyledComboBox(); self.backend.addItems(["native", "wsl"]); self.tool_dir = QLineEdit(); row.addWidget(self.backend); row.addWidget(self.tool_dir, 1); row.addWidget(self._button("浏览", self._browse_tools)); row.addWidget(self._button("保存配置", self._save_tools, True)); bl.addLayout(row); self.backend_label = QLabel(objectName="muted"); bl.addWidget(self.backend_label); bl.addWidget(self._button("自动补齐 Windows 工具", self._bootstrap_tools)); layout.addWidget(box)
         box, bl = self._card("功能可用性", "可用状态依据工具文件检测；实际命令执行结果以任务日志为准")
         self.capability_table = self._table(["功能", "状态", "工具"]); bl.addWidget(self.capability_table); layout.addWidget(box, 1); self.pages.addWidget(page)
         box, bl = self._card("CLI 高级设置", "与原版命令行菜单共用 settings.json")
@@ -658,7 +708,7 @@ class ArtWindow(QMainWindow):
         values = self.controller.get_settings()
         for index, (key, title, choices) in enumerate(setting_defs):
             row, col = divmod(index, 2); form.addWidget(QLabel(title, objectName="muted"), row, col * 2)
-            combo = QComboBox(); combo.addItems(list(choices)); current = str(values.get(key, ""))
+            combo = StyledComboBox(); combo.addItems(list(choices)); current = str(values.get(key, ""))
             for choice_index, choice in enumerate(choices):
                 if choice.startswith(current + " ") or choice == current:
                     combo.setCurrentIndex(choice_index); break
@@ -671,11 +721,23 @@ class ArtWindow(QMainWindow):
         row = QHBoxLayout(); self.avb_path = QLineEdit(); self.avb_path.setPlaceholderText("选择 .img 镜像")
         row.addWidget(self.avb_path, 1); row.addWidget(self._button("浏览", self._browse_avb)); al.addLayout(row)
         row = QHBoxLayout(); row.addWidget(self._button("解析信息", self._avb_info)); row.addWidget(self._button("验证签名", self._avb_verify)); row.addWidget(self._button("去除签名", self._avb_erase)); row.addStretch(); al.addLayout(row)
-        row2 = QHBoxLayout(); self.avb_kind = QComboBox(); self.avb_kind.addItems(["Hash footer", "Hashtree footer"]); self.avb_key = QLineEdit(); self.avb_key.setPlaceholderText("可选 avb.key")
-        row2.addWidget(QLabel("添加")); row2.addWidget(self.avb_kind); row2.addWidget(self.avb_key, 1); row2.addWidget(self._button("选择密钥", self._browse_avb_key)); row2.addWidget(self._button("添加 footer", self._avb_add, True)); al.addLayout(row2)
+        row2 = QHBoxLayout(); self.avb_kind = StyledComboBox(); self.avb_kind.addItems(["Hash footer", "Hashtree footer"])
+        row2.addWidget(QLabel("footer 类型")); row2.addWidget(self.avb_kind); row2.addStretch(); row2.addWidget(self._button("添加 footer", self._avb_add, True)); al.addLayout(row2)
+        key_row = QHBoxLayout(); self.avb_key_mode = StyledComboBox()
+        self.avb_key_mode.addItem("无密钥（不签名）", None)
+        self.avb_key_mode.addItem("内置 RSA2048 测试密钥", "builtin:rsa2048")
+        self.avb_key_mode.addItem("内置 RSA4096 测试密钥", "builtin:rsa4096")
+        self.avb_key_mode.addItem("自定义密钥", "custom")
+        self.avb_key_mode.setCurrentIndex(2)
+        self.avb_key = QLineEdit(); self.avb_key.setPlaceholderText("选择 PEM 格式 RSA 私钥")
+        self.avb_key_browse = self._button("选择密钥", self._browse_avb_key)
+        key_row.addWidget(QLabel("签名密钥")); key_row.addWidget(self.avb_key_mode); key_row.addWidget(self.avb_key, 1); key_row.addWidget(self.avb_key_browse); al.addLayout(key_row)
+        self.avb_key_hint = QLabel(objectName="muted"); self.avb_key_hint.setWordWrap(True); al.addWidget(self.avb_key_hint)
+        self.avb_key_mode.currentIndexChanged.connect(self._avb_key_changed)
+        self._avb_key_changed()
         self.avb_output = QPlainTextEdit(); self.avb_output.setReadOnly(True); self.avb_output.setMaximumBlockCount(3000); self.avb_output.setMinimumHeight(100); al.addWidget(self.avb_output); layout.addWidget(avb)
         ota, ol = self._card("OTA 工作区", "管理 OTA_WORK/sign-key、stock-zip 和 input-img；与原版 payload OTA 菜单共用目录")
-        row = QHBoxLayout(); self.ota_zip = QComboBox(); self.ota_zip.setMinimumWidth(180); self.ota_zip.currentTextChanged.connect(self._ota_select)
+        row = QHBoxLayout(); self.ota_zip = StyledComboBox(); self.ota_zip.setMinimumWidth(180); self.ota_zip.currentTextChanged.connect(self._ota_select)
         row.addWidget(QLabel("目标 OTA")); row.addWidget(self.ota_zip, 1); row.addWidget(self._button("刷新状态", self._refresh_ota)); row.addWidget(self._button("打开 OTA_WORK", lambda: self._open_project("OTA_WORK"))); ol.addLayout(row)
         row = QHBoxLayout(); row.addWidget(self._button("导入 OTA ZIP", self._ota_import_zip)); row.addWidget(self._button("导入替换镜像", self._ota_import_images)); row.addStretch(); ol.addLayout(row)
         row = QHBoxLayout(); self.ota_key_status = QLabel(objectName="muted"); row.addWidget(self.ota_key_status, 1); self.ota_disable_avb = QCheckBox("禁用 AVB 修补"); row.addWidget(self.ota_disable_avb); row.addWidget(self._button("生成密钥", self._ota_generate)); row.addWidget(self._button("修补 OTA", self._ota_patch, True)); row.addWidget(self._button("验证 OTA", self._ota_verify, True)); ol.addLayout(row)
@@ -691,8 +753,22 @@ class ArtWindow(QMainWindow):
         if path: self.avb_path.setText(path)
 
     def _browse_avb_key(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择 AVB 密钥", filter="密钥 (*.key);;所有文件 (*.*)")
-        if path: self.avb_key.setText(path)
+        path, _ = QFileDialog.getOpenFileName(self, "选择 AVB 密钥", filter="RSA 私钥 (*.pem *.key);;所有文件 (*.*)")
+        if path:
+            self.avb_key_mode.setCurrentIndex(3)
+            self.avb_key.setText(path)
+
+    def _avb_key_changed(self, index=None):
+        selected = self.avb_key_mode.currentData()
+        custom = selected == "custom"
+        self.avb_key.setEnabled(custom)
+        self.avb_key_browse.setEnabled(custom)
+        if custom:
+            self.avb_key_hint.setText("使用自定义 RSA 私钥；签名算法根据密钥位数自动选择。")
+        elif selected:
+            self.avb_key_hint.setText("内置密钥为公开测试密钥；刷写时需与设备信任的公钥匹配。")
+        else:
+            self.avb_key_hint.setText("添加未签名的 AVB footer，签名算法为 NONE。")
 
     def _avb_call(self, fn, message):
         path = self.avb_path.text().strip()
@@ -705,12 +781,24 @@ class ArtWindow(QMainWindow):
     def _avb_add(self):
         path = self.avb_path.text().strip()
         if not path: QMessageBox.information(self, "选择镜像", "请先选择镜像文件。"); return
-        key = self.avb_key.text().strip() or None; kind = "hash" if self.avb_kind.currentIndex() == 0 else "hashtree"
+        key = self.avb_key_mode.currentData()
+        if key == "custom":
+            key = self.avb_key.text().strip()
+            if not key:
+                QMessageBox.information(self, "选择密钥", "请先选择自定义 RSA 私钥文件。")
+                return
+        kind = "hash" if self.avb_kind.currentIndex() == 0 else "hashtree"
         self._thread_call(lambda: self.controller.avb_add_footer(path, kind=kind, key=key), "正在添加 AVB footer…")
 
     def _refresh_ota(self):
-        project = self._require_project()
-        if not project: return
+        project = self.project_combo.currentText()
+        if not project:
+            # AVB tools on the same page also work with standalone images.
+            # A passive page refresh must not block them with a project dialog.
+            self.ota_zip.blockSignals(True); self.ota_zip.clear(); self.ota_zip.blockSignals(False)
+            self.ota_key_status.setText("选择工程后管理 OTA 工作区")
+            self.ota_files.clear()
+            return
         try:
             status = self.controller.ota_status(project); self.ota_zip.blockSignals(True); self.ota_zip.clear(); self.ota_zip.addItems(status["stock_zips"]); self.ota_zip.setCurrentText(status["selected"]); self.ota_zip.blockSignals(False)
             keys = [name for name, present in status["keys"].items() if present]; self.ota_key_status.setText(f"密钥：{len(keys)}/{len(status['keys'])} · 输入镜像：{len(status['input_images'])} · 已签名：{len(status['signed_zips'])}")
@@ -1037,7 +1125,7 @@ class ArtWindow(QMainWindow):
         self._start(operation, **params)
 
     def _repack_options(self, count):
-        dialog = StyledDialog(self, "回包参数", (480, 390)); form = QFormLayout(); fs = QComboBox(); fs.addItems(["自动（按原始文件系统）", "EXT4", "EROFS"]); size = QComboBox(); size.addItems(["保留原始尺寸", "自动估算", "自定义 MiB"]); custom = QLineEdit(); custom.setPlaceholderText("例如 4096"); comp = QComboBox(); comp.addItems(["lz4hc", "lz4", "zstd", "lzma"]); level = QSpinBox(); level.setRange(1, 12); level.setValue(9); sparse = QCheckBox("输出 Android Sparse 镜像"); form.addRow(QLabel(f"已选择 {count} 个分区", objectName="dialogHint")); form.addRow("文件系统", fs); form.addRow("镜像大小", size); form.addRow("自定义 MiB", custom); form.addRow("EROFS 压缩", comp); form.addRow("压缩等级", level); form.addRow(sparse); dialog.body.addLayout(form); buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel); buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确定"); buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消"); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); dialog.body.addWidget(buttons)
+        dialog = StyledDialog(self, "回包参数", (480, 390)); form = QFormLayout(); fs = StyledComboBox(); fs.addItems(["自动（按原始文件系统）", "EXT4", "EROFS"]); size = StyledComboBox(); size.addItems(["保留原始尺寸", "自动估算", "自定义 MiB"]); custom = QLineEdit(); custom.setPlaceholderText("例如 4096"); comp = StyledComboBox(); comp.addItems(["lz4hc", "lz4", "zstd", "lzma"]); level = QSpinBox(); level.setRange(1, 12); level.setValue(9); sparse = QCheckBox("输出 Android Sparse 镜像"); form.addRow(QLabel(f"已选择 {count} 个分区", objectName="dialogHint")); form.addRow("文件系统", fs); form.addRow("镜像大小", size); form.addRow("自定义 MiB", custom); form.addRow("EROFS 压缩", comp); form.addRow("压缩等级", level); form.addRow(sparse); dialog.body.addLayout(form); buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel); buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确定"); buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消"); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); dialog.body.addWidget(buttons)
         if dialog.exec() != QDialog.Accepted: return None
         mode = {"自动（按原始文件系统）": "auto", "EXT4": "ext", "EROFS": "erofs"}[fs.currentText()]; image_size = "original" if size.currentText() == "保留原始尺寸" else "auto"
         if size.currentText() == "自定义 MiB":

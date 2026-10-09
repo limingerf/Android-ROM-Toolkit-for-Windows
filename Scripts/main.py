@@ -150,6 +150,11 @@ def init():
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
+    # Tool subprocesses must dispatch before the frozen desktop default.
+    # Re-running art.exe as a Python interpreter would otherwise open a GUI.
+    if len(sys.argv) > 1 and sys.argv[1] == '--avbtool':
+        from Scripts.avbtool_windows import main as avbtool_main
+        raise SystemExit(avbtool_main(sys.argv[2:]))
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument('--gui', action='store_true', help='启动桌面图形界面')
     parser.add_argument('--mcp', action='store_true', help='以 MCP stdio 服务运行')
