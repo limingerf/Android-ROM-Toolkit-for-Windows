@@ -30,6 +30,15 @@ TOOLS = [
     {"name": "art_update_settings", "description": "更新原版 CLI 的合成、EROFS、SUPER 与 DAT 设置。", "inputSchema": {"type": "object", "properties": {"updates": {"type": "object"}}, "required": ["updates"]}},
     {"name": "art_payload_partitions", "description": "列出 INPUT/payload.bin 中可选择提取的分区。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "source": {"type": "string"}}, "required": ["project", "source"]}},
     {"name": "art_super_partitions", "description": "读取 INPUT/super.img 中的逻辑分区列表。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "source": {"type": "string"}}, "required": ["project", "source"]}},
+    {"name": "art_avb_info", "description": "解析镜像 AVB/VBMeta 信息。", "inputSchema": {"type": "object", "properties": {"image": {"type": "string"}}, "required": ["image"]}},
+    {"name": "art_avb_verify", "description": "验证镜像 AVB 签名。", "inputSchema": {"type": "object", "properties": {"image": {"type": "string"}}, "required": ["image"]}},
+    {"name": "art_avb_erase_footer", "description": "复制并去除镜像 AVB footer。", "inputSchema": {"type": "object", "properties": {"image": {"type": "string"}, "output": {"type": "string"}}, "required": ["image"]}},
+    {"name": "art_avb_add_footer", "description": "复制镜像并添加 AVB hash 或 hashtree footer。", "inputSchema": {"type": "object", "properties": {"image": {"type": "string"}, "kind": {"type": "string", "enum": ["hash", "hashtree"]}, "key": {"type": "string"}, "partition_name": {"type": "string"}, "partition_size": {"type": "integer"}, "output": {"type": "string"}}, "required": ["image"]}},
+    {"name": "art_ota_status", "description": "查看工程 OTA_WORK 状态。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}}, "required": ["project"]}},
+    {"name": "art_ota_select", "description": "选择 OTA_WORK/stock-zip 中的 OTA 包。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "name": {"type": "string"}}, "required": ["project", "name"]}},
+    {"name": "art_ota_verify", "description": "使用 avbroot 验证 OTA 包签名。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "archive": {"type": "string"}}, "required": ["project"]}},
+    {"name": "art_ota_generate_keys", "description": "为工程生成 AVB/OTA 密钥材料。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "passphrase": {"type": "string"}}, "required": ["project"]}},
+    {"name": "art_ota_patch", "description": "使用 OTA_WORK/input-img 中的镜像修补选定 OTA 包。", "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "disable_avb": {"type": "boolean"}}, "required": ["project"]}},
 ]
 
 
@@ -58,6 +67,15 @@ class McpServer:
             "art_update_settings": lambda: self.controller.update_settings(args.get("updates") or {}),
             "art_payload_partitions": lambda: self.controller.payload_partitions(args.get("project", ""), args.get("source", "")),
             "art_super_partitions": lambda: self.controller.super_partitions(args.get("project", ""), args.get("source", "")),
+            "art_avb_info": lambda: self.controller.avb_info(args.get("image", "")),
+            "art_avb_verify": lambda: self.controller.avb_verify(args.get("image", "")),
+            "art_avb_erase_footer": lambda: self.controller.avb_erase_footer(args.get("image", ""), args.get("output")),
+            "art_avb_add_footer": lambda: self.controller.avb_add_footer(args.get("image", ""), kind=args.get("kind", "hash"), key=args.get("key"), partition_name=args.get("partition_name"), partition_size=args.get("partition_size"), output=args.get("output")),
+            "art_ota_status": lambda: self.controller.ota_status(args.get("project", "")),
+            "art_ota_select": lambda: self.controller.ota_select_zip(args.get("project", ""), args.get("name", "")),
+            "art_ota_verify": lambda: self.controller.ota_verify(args.get("project", ""), args.get("archive")),
+            "art_ota_generate_keys": lambda: self.controller.ota_generate_keys(args.get("project", ""), args.get("passphrase", "")),
+            "art_ota_patch": lambda: self.controller.ota_patch(args.get("project", ""), disable_avb=args.get("disable_avb", False)),
         }
         if name not in operations:
             raise ValueError(f"未知工具: {name}")
@@ -160,6 +178,45 @@ def main(root=None):
         @server.tool()
         def art_super_partitions(project: str, source: str) -> list[str]:
             return controller.super_partitions(project, source)
+
+        @server.tool()
+        def art_avb_info(image: str) -> dict:
+            return controller.avb_info(image)
+
+        @server.tool()
+        def art_avb_verify(image: str) -> dict:
+            return controller.avb_verify(image)
+
+        @server.tool()
+        def art_avb_erase_footer(image: str, output: str | None = None) -> dict:
+            return controller.avb_erase_footer(image, output)
+
+        @server.tool()
+        def art_avb_add_footer(image: str, kind: str = "hash", key: str | None = None,
+                               partition_name: str | None = None, partition_size: int | None = None,
+                               output: str | None = None) -> dict:
+            return controller.avb_add_footer(image, kind=kind, key=key, partition_name=partition_name,
+                                             partition_size=partition_size, output=output)
+
+        @server.tool()
+        def art_ota_status(project: str) -> dict:
+            return controller.ota_status(project)
+
+        @server.tool()
+        def art_ota_select(project: str, name: str) -> dict:
+            return controller.ota_select_zip(project, name)
+
+        @server.tool()
+        def art_ota_verify(project: str, archive: str | None = None) -> dict:
+            return controller.ota_verify(project, archive)
+
+        @server.tool()
+        def art_ota_generate_keys(project: str, passphrase: str = "") -> dict:
+            return controller.ota_generate_keys(project, passphrase)
+
+        @server.tool()
+        def art_ota_patch(project: str, disable_avb: bool = False) -> dict:
+            return controller.ota_patch(project, disable_avb=disable_avb)
 
         server.run(transport="stdio")
         return

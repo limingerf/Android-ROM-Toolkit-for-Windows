@@ -278,6 +278,155 @@ class ArtController:
         return [{"name": path.name, "path": str(path), "size": path.stat().st_size}
                 for path in sorted(layout.out_dir.iterdir()) if path.is_file()]
 
+    # ---- AVB / OTA non-interactive helpers -----------------------------
+    def _tool_capture(self, tool: str, args: list[str], *, cwd=None) -> dict:
+        """Run a bundled host tool and return a stable GUI-friendly result."""
+        command = self.toolchain.command([tool, *[str(item) for item in args]], bundled=True)
+        process = subprocess.run(command, cwd=str(cwd) if cwd else None,
+                                 capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", env=self.toolchain.environment(),
+                                 **process_options())
+        output = (process.stdout or "") + (process.stderr or "")
+        return {"ok": process.returncode == 0, "code": process.returncode,
+                "command": command, "output": output.strip()}
+
+    @staticmethod
+    def _require_file(path: str | os.PathLike[str], label: str = "文件") -> Path:
+        value = Path(path).expanduser().resolve()
+        if not value.is_file():
+            raise FileNotFoundError(f"{label}不存在：{value}")
+        return value
+
+    def avb_info(self, image: str) -> dict:
+        image_path = self._require_file(image, "镜像")
+        result = self._tool_capture("avbtool", ["info_image", "--image", image_path])
+        result.update({"operation": "info", "image": str(image_path)})
+        if not result["ok"]:
+            raise RuntimeError(result["output"] or f"avbtool 退出码 {result['code']}")
+        return result
+
+    def avb_verify(self, image: str) -> dict:
+        image_path = self._require_file(image, "镜像")
+        result = self._tool_capture("avbtool", ["verify_image", "--image", image_path])
+        result.update({"operation": "verify", "image": str(image_path), "verified": bool(result["ok"])})
+        return result
+
+    def avb_erase_footer(self, image: str, output: str | None = None) -> dict:
+        image_path = self._require_file(image, "镜像")
+        target = Path(output).expanduser().resolve() if output else image_path.with_name(image_path.stem + "_unsign" + image_path.suffix)
+        if target == image_path:
+            raise ValueError("输出文件不能覆盖输入镜像，请指定新文件名")
+        target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(image_path, target)
+        result = self._tool_capture("avbtool", ["erase_footer", "--image", target])
+        result.update({"operation": "erase_footer", "image": str(image_path), "output": str(target)})
+        if not result["ok"]:
+            target.unlink(missing_ok=True)
+            raise RuntimeError(result["output"] or f"avbtool 退出码 {result['code']}")
+        return result
+
+    def avb_add_footer(self, image: str, *, kind: str = "hash", partition_name: str | None = None,
+                       partition_size: int | None = None, algorithm: str = "SHA256_RSA4096",
+                       key: str | None = None, output: str | None = None,
+                       rollback_index: int = 0) -> dict:
+        image_path = self._require_file(image, "镜像")
+        if kind not in {"hash", "hashtree"}: raise ValueError("签名类型必须是 hash 或 hashtree")
+        key_path = self._require_file(key, "AVB 密钥") if key else None
+        target = Path(output).expanduser().resolve() if output else image_path.with_name(image_path.stem + "_signed" + image_path.suffix)
+        if target == image_path: raise ValueError("输出文件不能覆盖输入镜像，请指定新文件名")
+        target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(image_path, target)
+        part = partition_name or image_path.stem
+        if partition_size is None:
+            partition_size = ((target.stat().st_size + (69632 if kind == "hash" else 0) + 4095) // 4096) * 4096
+        args = ["add_hash_footer" if kind == "hash" else "add_hashtree_footer", "--image", target,
+                "--partition_name", part, "--algorithm", algorithm, "--partition_size", int(partition_size)]
+        if key_path: args.extend(["--key", key_path])
+        if kind == "hash": args.extend(["--rollback_index", int(rollback_index)])
+        result = self._tool_capture("avbtool", args)
+        result.update({"operation": "add_" + kind + "_footer", "image": str(image_path), "output": str(target)})
+        if not result["ok"]:
+            target.unlink(missing_ok=True)
+            raise RuntimeError(result["output"] or f"avbtool 退出码 {result['code']}")
+        return result
+
+    def ota_status(self, project: str) -> dict:
+        layout = self._layout(project)
+        for directory in (layout.ota_work_dir, layout.ota_signkey_dir, layout.ota_stockzip_dir, layout.ota_inputimg_dir): directory.mkdir(parents=True, exist_ok=True)
+        keys = ("avb.key", "ota.key", "avb_pkmd.bin", "ota.crt", "passphrase.txt")
+        selected_file = layout.ota_stockzip_dir / ".select"
+        selected = selected_file.read_text(encoding="utf-8").strip() if selected_file.is_file() else ""
+        return {"path": str(layout.ota_work_dir), "selected": selected,
+                "keys": {name: (layout.ota_signkey_dir / name).is_file() for name in keys},
+                "stock_zips": [p.name for p in sorted(layout.ota_stockzip_dir.glob("*.zip")) if p.is_file()],
+                "input_images": [p.name for p in sorted(layout.ota_inputimg_dir.glob("*.img")) if p.is_file()],
+                "signed_zips": [p.name for p in sorted(layout.ota_work_dir.glob("*_signed.zip")) if p.is_file()]}
+
+    def ota_select_zip(self, project: str, name: str) -> dict:
+        layout = self._layout(project); candidate = Path(name).expanduser()
+        if candidate.parent != Path("."):
+            candidate = candidate.resolve()
+            if candidate.parent != layout.ota_stockzip_dir.resolve(): raise ValueError("OTA 包必须位于 OTA_WORK/stock-zip")
+        else: candidate = layout.ota_stockzip_dir / candidate.name
+        if candidate.suffix.lower() != ".zip" or not candidate.is_file(): raise FileNotFoundError(f"OTA 包不存在：{candidate.name}")
+        layout.ota_stockzip_dir.mkdir(parents=True, exist_ok=True); (layout.ota_stockzip_dir / ".select").write_text(candidate.name, encoding="utf-8")
+        return self.ota_status(project)
+
+    def ota_generate_keys(self, project: str, passphrase: str = "") -> dict:
+        layout = self._layout(project); key_dir = layout.ota_signkey_dir; key_dir.mkdir(parents=True, exist_ok=True)
+        pass_file = key_dir / "passphrase.txt"
+        if passphrase: pass_file.write_text(passphrase, encoding="utf-8")
+        else: pass_file.unlink(missing_ok=True)
+        pf = ["--pass-file", pass_file] if pass_file.is_file() else []
+        commands = [
+            (["key", "generate-key", "-t", "rsa4096", "-o", key_dir / "avb.key"] + pf),
+            (["key", "generate-key", "-t", "rsa4096", "-o", key_dir / "ota.key"] + pf),
+            (["key", "encode-avb", "-k", key_dir / "avb.key", "-o", key_dir / "avb_pkmd.bin"] + pf),
+            (["key", "generate-cert", "-k", key_dir / "ota.key", "-o", key_dir / "ota.crt"] + pf),]
+        results = []
+        for args in commands:
+            result = self._tool_capture("avbroot", args, cwd=layout.ota_work_dir); results.append(result)
+            if not result["ok"]: raise RuntimeError(result["output"] or f"avbroot 退出码 {result['code']}")
+        return {"results": results, **self.ota_status(project)}
+
+    def ota_verify(self, project: str, archive: str | None = None) -> dict:
+        layout = self._layout(project)
+        if archive: zip_path = self._require_file(archive, "OTA 包")
+        else:
+            status = self.ota_status(project); selected = status["selected"]
+            zip_path = self._require_file(layout.ota_stockzip_dir / selected, "OTA 包") if selected else None
+            if zip_path is None:
+                signed = sorted(layout.ota_work_dir.glob("*_signed.zip")); zip_path = signed[-1] if signed else None
+            if zip_path is None: raise FileNotFoundError("没有可验证的 OTA 包")
+        args = ["ota", "verify", "--input", zip_path]; cert = layout.ota_signkey_dir / "ota.crt"; pkmd = layout.ota_signkey_dir / "avb_pkmd.bin"
+        if cert.is_file(): args.extend(["--cert-ota", cert])
+        if pkmd.is_file(): args.extend(["--public-key-avb", pkmd])
+        result = self._tool_capture("avbroot", args, cwd=layout.ota_work_dir); result.update({"archive": str(zip_path), "verified": result["ok"]}); return result
+
+    def ota_patch(self, project: str, *, disable_avb: bool = False) -> dict:
+        """Patch the selected stock OTA using images staged in input-img."""
+        layout = self._layout(project); status = self.ota_status(project)
+        if not status["selected"]: raise ValueError("请先在 OTA_WORK/stock-zip 中选择 OTA 包")
+        zip_path = layout.ota_stockzip_dir / status["selected"]
+        images = sorted(layout.ota_inputimg_dir.glob("*.img"))
+        if not images: raise FileNotFoundError("OTA_WORK/input-img 内没有 .img 文件")
+        key_dir = layout.ota_signkey_dir; ota_key = key_dir / "ota.key"; ota_crt = key_dir / "ota.crt"; avb_key = key_dir / "avb.key"
+        if not ota_key.is_file() or not ota_crt.is_file(): raise FileNotFoundError("请先生成 OTA 密钥")
+        listing = self._tool_capture("avbroot", ["ota", "list", "--input", zip_path], cwd=layout.ota_work_dir)
+        existing = set(listing["output"].splitlines()) if listing["ok"] else set()
+        output = layout.ota_work_dir / (zip_path.stem + "_signed.zip")
+        args = ["ota", "patch", "--input", zip_path, "--output", output, "--key-ota", ota_key, "--cert-ota", ota_crt, "--rootless"]
+        pass_file = key_dir / "passphrase.txt"
+        if pass_file.is_file(): args.extend(["--pass-ota-file", pass_file])
+        if not disable_avb and avb_key.is_file():
+            args.extend(["--key-avb", avb_key])
+            if pass_file.is_file(): args.extend(["--pass-avb-file", pass_file])
+        for image in images:
+            part = image.stem
+            args.extend(["--replace" if part in existing else "--add-partition", part, image])
+        if disable_avb: args.extend(["--disable-avb", "--skip-system-ota-cert"])
+        result = self._tool_capture("avbroot", args, cwd=layout.ota_work_dir); result.update({"archive": str(output), "disabled_avb": disable_avb})
+        if not result["ok"]: raise RuntimeError(result["output"] or f"avbroot 退出码 {result['code']}")
+        return result
+
     def job_request(self, operation: str, **params) -> dict:
         if operation not in {"extract", "repack", "repack_batch", "repack_super", "convert"}:
             raise ValueError("未知操作")

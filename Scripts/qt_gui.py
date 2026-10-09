@@ -17,14 +17,16 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, QEvent, QPoint
-from PySide6.QtGui import QAction, QIcon, QFont, QPixmap
+from PySide6.QtGui import QAction, QIcon, QFont, QPixmap, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget, QHeaderView,
+    QScrollArea, QSizePolicy,
 )
+from PySide6.QtCore import QUrl
 
 from Scripts.application import ArtController, ROOT
 from Scripts.Platform.runtime import CAPABILITIES, process_options
@@ -159,8 +161,8 @@ class ArtWindow(QMainWindow):
         self._action_buttons = []
         self.ui_theme = self._load_theme()
         self.setWindowTitle("Android ROM Toolkit for Windows")
-        self.setMinimumSize(1040, 700)
-        self.resize(1240, 800)
+        self.setMinimumSize(900, 620)
+        self.resize(1180, 760)
         self._set_icon()
         self._resize_margin = 7
         self._resize_mode = None
@@ -228,6 +230,16 @@ class ArtWindow(QMainWindow):
                 if mode:
                     self._resize_mode = mode
                     self._resize_start_pos = point
+                    handle = self.windowHandle()
+                    edges = {"l": Qt.Edge.LeftEdge, "r": Qt.Edge.RightEdge,
+                             "t": Qt.Edge.TopEdge, "b": Qt.Edge.BottomEdge}
+                    edge_flags = Qt.Edges()
+                    for side, edge in edges.items():
+                        if side in mode:
+                            edge_flags |= edge
+                    if handle and edge_flags and handle.startSystemResize(edge_flags):
+                        self._resize_mode = None
+                        return True
                     self._resize_start_geometry = self.geometry()
                     return True
             elif event.type() == QEvent.Type.MouseMove and self._resize_mode:
@@ -292,15 +304,22 @@ class ArtWindow(QMainWindow):
             QPushButton#windowMin:hover, QPushButton#windowMax:hover { background: rgba(77, 112, 172, 35); color: #1e3a63; }
             QPushButton#windowClose:hover { background: #df5d78; color: white; }
             QFrame#sidebar { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #e7edfb, stop:0.48 #e9f4ff, stop:1 #e2f5f2); border-right: 1px solid #d5e0f0; }
+            QScrollArea#pageScroll { background: transparent; border: 0; }
+            QScrollBar:vertical { background: transparent; width: 10px; margin: 5px 0; }
+            QScrollBar::handle:vertical { background: #b8c9e3; border-radius: 5px; min-height: 32px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
             QFrame#card, QGroupBox { background: rgba(255,255,255,218); border: 1px solid rgba(196,211,232,210); border-radius: 14px; }
             QGroupBox { margin-top: 12px; padding: 18px 12px 12px 12px; }
             QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 7px; font-weight: 700; color: #1c3356; background: #eef3fb; }
             QLabel#muted { color: #6c7d96; }
             QLabel#title { font-size: 20pt; font-weight: 750; color: #14294a; }
             QPushButton { border: 1px solid #c4d1e5; border-radius: 8px; padding: 8px 15px; background: rgba(255,255,255,235); color: #1c355b; }
+            QPushButton#secondary { min-height: 34px; font-weight: 600; }
             QPushButton:hover { background: #e6efff; border-color: #638bd2; }
+            QPushButton:pressed { background: #d2e1fb; padding-top: 9px; }
             QPushButton#primary { color: white; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3c70d6, stop:1 #517fde); border-color: #3c70d6; font-weight: 650; }
             QPushButton#primary:hover { background: #315dbb; }
+            QPushButton#primary:pressed { background: #264d9e; }
             QPushButton:disabled { color: #9daabe; background: #e5ebf4; }
             QListWidget#nav { background: transparent; border: 0; outline: 0; }
             QListWidget#nav::item { padding: 12px 14px; margin: 4px 0; border-radius: 9px; color: #60718d; }
@@ -329,11 +348,13 @@ class ArtWindow(QMainWindow):
                 QPushButton#windowMin, QPushButton#windowMax, QPushButton#windowClose { color: #b9c9e1; }
                 QPushButton#windowMin:hover, QPushButton#windowMax:hover { background: rgba(120, 160, 230, 55); color: #fff; }
                 QFrame#sidebar { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #172239, stop:0.5 #15283a, stop:1 #143331); border-color: #2b3e57; }
+                QScrollBar::handle:vertical { background: #405b7e; }
                 QFrame#card, QGroupBox, QTableWidget, QLineEdit, QComboBox, QSpinBox { background: rgba(26,37,55,230); border-color: #334962; }
                 QGroupBox::title { background: #101721; color: #d5e3fb; }
                 QLabel#muted { color: #95a8c3; }
                 QLabel#title { color: #edf4ff; }
                 QPushButton { background: #1a2638; color: #ecf2fc; border-color: #3c526f; }
+                QPushButton:pressed { background: #14243b; }
                 QPushButton:hover { background: #263d60; }
                 QListWidget#nav::item:selected { background: #294467; color: #f4f8ff; }
                 QPlainTextEdit { background: #101925; color: #cbd9ef; border-color: #33415a; }
@@ -394,7 +415,7 @@ class ArtWindow(QMainWindow):
         side_layout.addWidget(sub)
         side_layout.addSpacing(22)
         self.nav = QListWidget(objectName="nav")
-        self.nav.addItems(["工作台", "镜像处理", "工具链", "MCP 连接"])
+        self.nav.addItems(["工作台", "镜像处理", "工具链", "高级工具", "MCP 连接"])
         self.nav.currentRowChanged.connect(self._show_page)
         side_layout.addWidget(self.nav)
         side_layout.addStretch()
@@ -418,11 +439,18 @@ class ArtWindow(QMainWindow):
         header.addWidget(self.project_combo)
         ml.addLayout(header)
         self.pages = QStackedWidget()
-        ml.addWidget(self.pages, 1)
+        self.pages.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        page_scroll = QScrollArea()
+        page_scroll.setObjectName("pageScroll")
+        page_scroll.setWidgetResizable(True)
+        page_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        page_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        page_scroll.setWidget(self.pages)
+        ml.addWidget(page_scroll, 1)
         self.status = QLabel("就绪", objectName="muted")
         ml.addWidget(self.status)
         shell.addWidget(main, 1)
-        self._workspace_page(); self._images_page(); self._runtime_page(); self._mcp_page()
+        self._workspace_page(); self._images_page(); self._runtime_page(); self._advanced_page(); self._mcp_page()
         self.nav.setCurrentRow(0)
 
     def _card(self, title, subtitle=""):
@@ -445,13 +473,14 @@ class ArtWindow(QMainWindow):
 
     def _workspace_page(self):
         page = QWidget(); layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 12, 18); layout.setSpacing(16)
         stats = QHBoxLayout(); self.stat_labels = []
         for title, detail in (("工程", "INPUT / WORKSPACE / OUT"), ("输入文件", "原始镜像与 ROM 文件"), ("产物", "已完成的输出文件")):
-            box, bl = self._card(title, detail); value = QLabel("0"); value.setStyleSheet("font-size: 24pt; font-weight: 700; color:#376fd1;")
+            box, bl = self._card(title, detail); box.setMinimumWidth(170); value = QLabel("0"); value.setStyleSheet("font-size: 24pt; font-weight: 700; color:#376fd1;")
             bl.addWidget(value); stats.addWidget(box); self.stat_labels.append(value)
         layout.addLayout(stats)
         splitter = QSplitter(Qt.Horizontal)
-        box, bl = self._card("工程列表", "双击工程进入镜像处理")
+        box, bl = self._card("工程列表", "双击工程进入镜像处理"); box.setMinimumWidth(500)
         self.project_table = self._table(["工程", "状态", "输入", "产物"], QTableWidget.SingleSelection)
         self.project_table.itemSelectionChanged.connect(self._select_project)
         self.project_table.cellDoubleClicked.connect(lambda *_: self.nav.setCurrentRow(1))
@@ -462,21 +491,23 @@ class ArtWindow(QMainWindow):
         self.new_name = QLineEdit(); self.new_name.setPlaceholderText("例如 DNA_MAYFLY_ORIGIN")
         bl2.addWidget(QLabel("工程名称", objectName="muted")); bl2.addWidget(self.new_name); bl2.addWidget(self._button("创建工程", self._create_project, True)); bl2.addSpacing(12)
         bl2.addWidget(QLabel("快速开始\n01 创建或选择工程\n02 导入镜像文件\n03 提取后编辑工作区\n04 回包并检查产物", objectName="muted")); bl2.addStretch()
-        splitter.addWidget(box2); splitter.setSizes([700, 300]); layout.addWidget(splitter, 1)
+        splitter.addWidget(box2); splitter.setSizes([700, 300]); splitter.setChildrenCollapsible(False); layout.addWidget(splitter, 1)
         self.pages.addWidget(page)
 
     def _images_page(self):
         page = QWidget(); layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 12, 18); layout.setSpacing(16)
         box, bl = self._card("镜像与分区", "Payload / super 提取到 OUT；文件系统镜像提取到 WORKSPACE")
         top = QHBoxLayout(); top.addWidget(self._button("导入文件", self._import_files, True)); top.addWidget(self._button("导入 ROM ZIP", self._import_archive)); top.addWidget(self._button("刷新", self.refresh_inputs)); top.addStretch(); top.addWidget(self._button("打开输出", lambda: self._open_project("OUT"))); bl.addLayout(top)
         tabs = QTabWidget(); bl.addWidget(tabs, 1)
         input_tab = QWidget(); il = QVBoxLayout(input_tab)
         self.input_table = self._table(["文件", "格式", "大小"]); il.addWidget(self.input_table)
         row = QHBoxLayout(); row.addWidget(self._button("提取所选", self._extract, True)); self.deep = QCheckBox("继续解包 Payload / super 中的 IMG"); self.deep.setChecked(True); row.addWidget(self.deep); row.addWidget(self._button("转为 Sparse", lambda: self._convert("sparse"))); row.addWidget(self._button("转为 RAW", lambda: self._convert("raw"))); il.addLayout(row)
-        fmt = QHBoxLayout(); fmt.addWidget(QLabel("按类型解包", objectName="muted"))
+        fmt = QGridLayout(); fmt.setHorizontalSpacing(8); fmt.setVerticalSpacing(8); fmt.addWidget(QLabel("按类型解包", objectName="muted"), 0, 0)
         for label, value in (("解包 IMG", "img"), ("解包 Payload", "payload"), ("解包 DAT", "dat"), ("解包 DAT.BR", "dat.br"), ("解包 WIN", "win"), ("解包 super", "super")):
-            fmt.addWidget(self._button(label, lambda checked=False, v=value: self._extract_format(v)))
-        fmt.addStretch(); il.addLayout(fmt); tabs.addTab(input_tab, "输入文件")
+            index = list(("img", "payload", "dat", "dat.br", "win", "super")).index(value)
+            fmt.addWidget(self._button(label, lambda checked=False, v=value: self._extract_format(v)), index // 3, index % 3 + 1)
+        il.addLayout(fmt); tabs.addTab(input_tab, "输入文件")
         part_tab = QWidget(); pl = QVBoxLayout(part_tab)
         self.partition_table = self._table(["分区", "原文件系统"]); pl.addWidget(self.partition_table)
         row = QHBoxLayout(); row.addWidget(self._button("回包所选分区", self._repack, True)); row.addWidget(self._button("打开工作区", lambda: self._open_project("WORKSPACE"))); row.addStretch(); row.addWidget(QLabel("回包格式")); self.repack_target = QComboBox(); self.repack_target.addItems(["IMG", "DAT", "DAT.BR"]); row.addWidget(self.repack_target); self.sparse = QCheckBox("输出 Sparse"); row.addWidget(self.sparse); pl.addLayout(row); tabs.addTab(part_tab, "工作区分区")
@@ -515,6 +546,96 @@ class ArtWindow(QMainWindow):
             combo.setProperty("settingKey", key); self.cli_settings[key] = combo; form.addWidget(combo, row, col * 2 + 1)
         bl.addLayout(form); bl.addWidget(self._button("保存 CLI 设置", self._save_cli_settings, True)); layout.addWidget(box)
 
+    def _advanced_page(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        avb, al = self._card("AVB / VBMeta", "解析、验证、去除或添加镜像 AVB footer；命令在后台线程执行")
+        row = QHBoxLayout(); self.avb_path = QLineEdit(); self.avb_path.setPlaceholderText("选择 .img 镜像")
+        row.addWidget(self.avb_path, 1); row.addWidget(self._button("浏览", self._browse_avb)); al.addLayout(row)
+        row = QHBoxLayout(); row.addWidget(self._button("解析信息", self._avb_info)); row.addWidget(self._button("验证签名", self._avb_verify)); row.addWidget(self._button("去除签名", self._avb_erase)); row.addStretch(); al.addLayout(row)
+        row2 = QHBoxLayout(); self.avb_kind = QComboBox(); self.avb_kind.addItems(["Hash footer", "Hashtree footer"]); self.avb_key = QLineEdit(); self.avb_key.setPlaceholderText("可选 avb.key")
+        row2.addWidget(QLabel("添加")); row2.addWidget(self.avb_kind); row2.addWidget(self.avb_key, 1); row2.addWidget(self._button("选择密钥", self._browse_avb_key)); row2.addWidget(self._button("添加 footer", self._avb_add, True)); al.addLayout(row2)
+        self.avb_output = QPlainTextEdit(); self.avb_output.setReadOnly(True); self.avb_output.setMaximumBlockCount(3000); self.avb_output.setMinimumHeight(100); al.addWidget(self.avb_output); layout.addWidget(avb)
+        ota, ol = self._card("OTA 工作区", "管理 OTA_WORK/sign-key、stock-zip 和 input-img；与原版 payload OTA 菜单共用目录")
+        row = QHBoxLayout(); self.ota_zip = QComboBox(); self.ota_zip.setMinimumWidth(180); self.ota_zip.currentTextChanged.connect(self._ota_select)
+        row.addWidget(QLabel("目标 OTA")); row.addWidget(self.ota_zip, 1); row.addWidget(self._button("刷新状态", self._refresh_ota)); row.addWidget(self._button("打开 OTA_WORK", lambda: self._open_project("OTA_WORK"))); ol.addLayout(row)
+        row = QHBoxLayout(); row.addWidget(self._button("导入 OTA ZIP", self._ota_import_zip)); row.addWidget(self._button("导入替换镜像", self._ota_import_images)); row.addStretch(); ol.addLayout(row)
+        row = QHBoxLayout(); self.ota_key_status = QLabel(objectName="muted"); row.addWidget(self.ota_key_status, 1); self.ota_disable_avb = QCheckBox("禁用 AVB 修补"); row.addWidget(self.ota_disable_avb); row.addWidget(self._button("生成密钥", self._ota_generate)); row.addWidget(self._button("修补 OTA", self._ota_patch, True)); row.addWidget(self._button("验证 OTA", self._ota_verify, True)); ol.addLayout(row)
+        self.ota_files = QPlainTextEdit(); self.ota_files.setReadOnly(True); self.ota_files.setMinimumHeight(110); ol.addWidget(self.ota_files); layout.addWidget(ota, 1)
+        self.pages.addWidget(page)
+
+    def _browse_avb(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择 AVB 镜像", filter="镜像 (*.img *.bin);;所有文件 (*.*)")
+        if path: self.avb_path.setText(path)
+
+    def _browse_avb_key(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择 AVB 密钥", filter="密钥 (*.key);;所有文件 (*.*)")
+        if path: self.avb_key.setText(path)
+
+    def _avb_call(self, fn, message):
+        path = self.avb_path.text().strip()
+        if not path: QMessageBox.information(self, "选择镜像", "请先选择镜像文件。"); return
+        self._thread_call(lambda: fn(path), message)
+
+    def _avb_info(self): self._avb_call(self.controller.avb_info, "正在读取 AVB 信息…")
+    def _avb_verify(self): self._avb_call(self.controller.avb_verify, "正在验证 AVB 签名…")
+    def _avb_erase(self): self._avb_call(self.controller.avb_erase_footer, "正在去除 AVB footer…")
+    def _avb_add(self):
+        path = self.avb_path.text().strip()
+        if not path: QMessageBox.information(self, "选择镜像", "请先选择镜像文件。"); return
+        key = self.avb_key.text().strip() or None; kind = "hash" if self.avb_kind.currentIndex() == 0 else "hashtree"
+        self._thread_call(lambda: self.controller.avb_add_footer(path, kind=kind, key=key), "正在添加 AVB footer…")
+
+    def _refresh_ota(self):
+        project = self._require_project()
+        if not project: return
+        try:
+            status = self.controller.ota_status(project); self.ota_zip.blockSignals(True); self.ota_zip.clear(); self.ota_zip.addItems(status["stock_zips"]); self.ota_zip.setCurrentText(status["selected"]); self.ota_zip.blockSignals(False)
+            keys = [name for name, present in status["keys"].items() if present]; self.ota_key_status.setText(f"密钥：{len(keys)}/{len(status['keys'])} · 输入镜像：{len(status['input_images'])} · 已签名：{len(status['signed_zips'])}")
+            self.ota_files.setPlainText("stock-zip:\n  " + "\n  ".join(status["stock_zips"]) + "\n\ninput-img:\n  " + "\n  ".join(status["input_images"]) + "\n\n已输出:\n  " + "\n  ".join(status["signed_zips"]))
+        except Exception as error: self.ota_key_status.setText(str(error))
+
+    def _ota_select(self, name):
+        project = self._require_project()
+        if project and name: self._thread_call(lambda: self.controller.ota_select_zip(project, name), "正在选择 OTA 包…")
+
+    def _ota_import_zip(self):
+        project = self._require_project()
+        if not project: return
+        try:
+            path, _ = QFileDialog.getOpenFileName(self, "导入 OTA ZIP", filter="OTA ZIP (*.zip)")
+            if not path: return
+            layout = self.controller._layout(project)
+            target = layout.ota_stockzip_dir / Path(path).name; target.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.copy2(path, target)
+            self.controller.ota_select_zip(project, target.name); self._refresh_ota()
+        except Exception as error: QMessageBox.critical(self, "导入 OTA 失败", str(error))
+
+    def _ota_import_images(self):
+        project = self._require_project()
+        if not project: return
+        try:
+            paths, _ = QFileDialog.getOpenFileNames(self, "导入 OTA 替换镜像", filter="镜像 (*.img);;所有文件 (*.*)")
+            if not paths: return
+            layout = self.controller._layout(project); layout.ota_inputimg_dir.mkdir(parents=True, exist_ok=True)
+            import shutil
+            for path in paths: shutil.copy2(path, layout.ota_inputimg_dir / Path(path).name)
+            self._refresh_ota()
+        except Exception as error: QMessageBox.critical(self, "导入镜像失败", str(error))
+
+    def _ota_generate(self):
+        project = self._require_project()
+        if not project: return
+        self._thread_call(lambda: self.controller.ota_generate_keys(project), "正在生成 OTA 密钥…")
+
+    def _ota_verify(self):
+        project = self._require_project()
+        if project: self._thread_call(lambda: self.controller.ota_verify(project), "正在验证 OTA 签名…")
+
+    def _ota_patch(self):
+        project = self._require_project()
+        if project: self._thread_call(lambda: self.controller.ota_patch(project, disable_avb=self.ota_disable_avb.isChecked()), "正在修补 OTA…")
+
     def _save_cli_settings(self):
         updates = {}
         for key, combo in self.cli_settings.items():
@@ -540,9 +661,10 @@ class ArtWindow(QMainWindow):
     def _show_page(self, index):
         if index < 0: return
         self.current_page = index; self.pages.setCurrentIndex(index)
-        titles = [("工作台", "管理 ROM 工程，保留每次构建的输入、工作区和产物"), ("镜像处理", "按原文件系统解包与回包，任务日志实时可见"), ("工具链", "检测依赖并配置 Windows 原生工具或 WSL"), ("MCP 连接", "让支持 MCP 的客户端调用同一套工程与镜像操作")]
+        titles = [("工作台", "管理 ROM 工程，保留每次构建的输入、工作区和产物"), ("镜像处理", "按原文件系统解包与回包，任务日志实时可见"), ("工具链", "检测依赖并配置 Windows 原生工具或 WSL"), ("高级工具", "AVB/VBMeta 与 OTA 工作区管理"), ("MCP 连接", "让支持 MCP 的客户端调用同一套工程与镜像操作")]
         self.page_title.setText(titles[index][0]); self.page_subtitle.setText(titles[index][1])
         if index == 1: self.refresh_inputs()
+        if index == 3: self._refresh_ota()
 
     def _project_changed(self, _):
         self.refresh_inputs()
@@ -762,6 +884,9 @@ class ArtWindow(QMainWindow):
             elif kind == "error": self._log("失败：" + event.get("message", "")); self.status.setText("任务失败 · 详情见日志")
             elif kind == "result":
                 data = event.get("data", {})
+                avb_data = data.get("outputs") if isinstance(data, dict) else None
+                if isinstance(avb_data, dict) and hasattr(self, "avb_output") and ("output" in avb_data or "operation" in avb_data):
+                    self.avb_output.setPlainText(str(avb_data.get("output", "")) or json.dumps(avb_data, ensure_ascii=False, indent=2))
                 outputs = data.get("outputs", []) if isinstance(data, dict) else []
                 if isinstance(outputs, dict):
                     self._log(json.dumps(outputs, ensure_ascii=False, indent=2))
@@ -777,6 +902,8 @@ class ArtWindow(QMainWindow):
                 self._thread_busy = False
                 self._busy(False)
                 self.refresh()
+                if self.current_page == 3:
+                    self._refresh_ota()
 
     def _log(self, text): self._log_many([text])
     def _log_many(self, lines):
@@ -790,12 +917,23 @@ class ArtWindow(QMainWindow):
             else: self.process.terminate()
 
     def _open_project(self, folder=""):
+        # QPushButton.clicked carries a checked bool.  The project-directory
+        # button passes that signal directly, so normalize it before joining
+        # the path; otherwise ``Path / False`` raises silently in the slot.
+        if isinstance(folder, bool):
+            folder = ""
         project = self._require_project()
         if not project: return
-        path = self.controller.root / project / folder
-        if os.name == "nt": os.startfile(path)
-        elif sys.platform == "darwin": subprocess.Popen(["open", str(path)])
-        else: subprocess.Popen(["xdg-open", str(path)])
+        path = (self.controller.root / project / folder).resolve()
+        if not path.is_dir():
+            self.status.setText(f"目录不存在：{path}")
+            QMessageBox.warning(self, "打开目录失败", f"目录不存在：\n{path}")
+            return
+        if QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            self.status.setText(f"已打开：{path.name or path}")
+            return
+        self.status.setText(f"系统无法打开目录：{path}")
+        QMessageBox.warning(self, "打开目录失败", f"系统文件管理器未能打开：\n{path}")
 
     def _browse_tools(self):
         path = QFileDialog.getExistingDirectory(self, "选择 Windows 原生工具目录")

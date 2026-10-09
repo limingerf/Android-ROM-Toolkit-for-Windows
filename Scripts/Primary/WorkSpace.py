@@ -31,6 +31,9 @@ class UnsupportedLayoutError(LayoutError):
 # ═══════════════════════════════════════════════════════════════════════
 
 _SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+# OTA_WORK is created lazily by the optional OTA/VBMeta tools.  It is part of
+# the supported project root once those tools are used, while remaining
+# optional for newly-created projects.
 _ROOT_DIRS = frozenset({"INPUT", "OUT", "WORKSPACE", "OTA_WORK"})
 _RESERVED_WORKSPACE_NAMES = frozenset({"config", "INPUT", "OUT", "WORKSPACE"})
 
