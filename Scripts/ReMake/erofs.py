@@ -11,7 +11,7 @@ from Scripts.Primary.Utils import (
     call,
     get_dir_size,
 )
-from Scripts.Primary.FileConfigPatcher import patch_fsconfig, restore_symlinks
+from Scripts.Primary.FileConfigPatcher import patch_contexts, patch_fsconfig, restore_symlinks
 from Scripts.Primary.Console import display
 from Scripts.Primary.WorkSpace import load_image_json
 from Scripts.ReMake.dat_br import recompress_dat_br
@@ -66,6 +66,9 @@ def _prepare(source, fsconfig, contexts, dumpinfo):
 
     walk_contexts(fsconfig)
     patch_fsconfig(source, fsconfig)
+    # Give every workspace path an explicit label; appended rules are
+    # normalized (and byte-escaped) by the call below.
+    patch_contexts(source, contexts)
     walk_contexts(fsconfig)
     walk_contexts(contexts)
     _ensure_symlinks(source, fsconfig)

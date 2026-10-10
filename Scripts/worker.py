@@ -472,6 +472,12 @@ def _repack(controller, layout, stage, params):
         if V.toolchain.run(["e2fsck", "-fn", str(check_image)]) != 0:
             raise RuntimeError("EXT4 文件系统检查未通过")
         validation = "e2fsck -fn 通过；尚未进行设备启动验证"
+    # The job staged a copy of the metadata, so keep the labels completed
+    # during this repack in the project file where the user can correct them.
+    completed_contexts = stage.config_dir / (partition + "_contexts.txt")
+    if completed_contexts.is_file():
+        from Scripts.Primary.FileConfigPatcher import persist_context_rules
+        persist_context_rules(str(layout.config_dir / completed_contexts.name), str(completed_contexts))
     if params.get("_defer_publish"):
         return {"staged_artifacts": [str(path) for path in artifacts], "format": target,
                 "validation": validation}
