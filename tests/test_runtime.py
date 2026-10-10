@@ -136,7 +136,9 @@ class BackendTests(unittest.TestCase):
             toolchain = detect_toolchain(root)
             self.assertEqual(toolchain.mode, "native")
             self.assertIsNone(toolchain.wsl_executable)
-            self.assertEqual(toolchain.command(["e2fsck", "-fn", "system.img"])[0], str(checker / "e2fsck.exe"))
+            # The toolchain resolves its root, which expands 8.3 temp names on CI.
+            self.assertEqual(os.path.realpath(toolchain.command(["e2fsck", "-fn", "system.img"])[0]),
+                             os.path.realpath(checker / "e2fsck.exe"))
             os.environ["ART_BACKEND"] = "wsl"
             with patch("Scripts.Platform.runtime.shutil.which", return_value="wsl.exe"):
                 command = detect_toolchain(root).command(["e2fsck", "-fn", "E:\\art\\system.img"])

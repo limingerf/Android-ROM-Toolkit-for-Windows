@@ -49,7 +49,8 @@ class AvbControllerTests(unittest.TestCase):
         args = capture.call_args.args[1]
         self.assertEqual(args[args.index("--algorithm") + 1], "SHA256_RSA2048")
         self.assertEqual(args[args.index("--partition_size") + 1], 131072)
-        self.assertEqual(args[args.index("--key") + 1], key)
+        # Compare resolved paths: hosts with 8.3 names (CI) expand the temp root.
+        self.assertEqual(os.path.realpath(args[args.index("--key") + 1]), os.path.realpath(key))
 
     def test_signed_algorithm_without_key_fails_before_output(self):
         with self.assertRaisesRegex(ValueError, "必须选择 AVB 密钥"):

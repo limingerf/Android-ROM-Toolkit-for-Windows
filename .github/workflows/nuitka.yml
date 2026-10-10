@@ -176,4 +176,10 @@ jobs:
           pip install mcp cryptography zstandard rich
 
       - name: Run unit tests
-        run: python -m unittest discover -s tests -p "test_*.py"
+        # The application forces UTF-8 text streams at startup (Scripts/main.py);
+        # the suite imports the modules directly, so give the interpreter the same
+        # UTF-8 stdio.  Without it the runner's cp1252 console turns any Chinese
+        # diagnostic message into a UnicodeEncodeError.
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -X utf8 -m unittest discover -s tests -p "test_*.py"

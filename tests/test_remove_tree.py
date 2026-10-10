@@ -77,7 +77,11 @@ class PreparePartitionOutputTests(unittest.TestCase):
         target = Path(Utils.extended_path(deep))
         target.mkdir(parents=True)
         (target / "stale.bin").write_bytes(b"x")
-        self.assertFalse(Path(deep).exists())  # invisible without the prefix
+        if not Path(deep).exists():
+            # Only hosts without long-path support hide the plain path, and those
+            # are exactly the hosts where the regression below used to happen.
+            # CI runners enable long paths, so the plain path is visible there.
+            self.assertGreater(len(deep), 260)
         output_dir, _ = ext4._prepare_partition_output("system", deep)
         self.assertTrue(os.path.isdir(Utils.extended_path(deep)))
         self.assertFalse(os.path.exists(Utils.extended_path(os.path.join(deep, "stale.bin"))))
