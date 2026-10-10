@@ -1,6 +1,6 @@
 # **Android ROM Toolkit for Windows**
 
-当前版本：**v1.2.5**
+当前版本：**v1.2.6**
 
 #### **介绍**
 

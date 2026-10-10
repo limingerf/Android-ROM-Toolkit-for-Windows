@@ -9,6 +9,50 @@ from Scripts.Primary.Console import display
 from Scripts.Primary.ImageTools import get_file_type
 
 
+# The bundled magiskboot rejects zstd ("Unknown compression method: [zstd]"), so
+# such a ramdisk is expanded with Python instead.  The repack then writes the
+# ramdisk back as gzip, which magiskboot can produce.
+def _repack_compression(comp):
+    """Compression magiskboot should write back for a detected ramdisk format."""
+    return 'gzip' if comp == 'zstd' else comp
+
+
+def _decompress_zstd(source, destination):
+    """Expand a zstd stream without magiskboot.
+
+    ``copy_stream`` reports a truncated frame as a normal end of stream, which
+    would turn a damaged ramdisk into an empty file, so the frame end is checked
+    explicitly and a partial output is removed.
+    """
+    try:
+        import zstandard
+    except ImportError:
+        print("缺少 zstandard 模块，无法解压 zstd ramdisk")
+        return False
+    try:
+        with open(source, 'rb') as compressed, open(destination, 'wb') as expanded:
+            decompressor = zstandard.ZstdDecompressor().decompressobj()
+            for chunk in iter(lambda: compressed.read(1024 * 1024), b''):
+                expanded.write(decompressor.decompress(chunk))
+            if not decompressor.eof:
+                raise zstandard.ZstdError('zstd 数据在帧结束前结束')
+    except (OSError, zstandard.ZstdError) as error:
+        print(f"zstd 解压失败: {error}")
+        try:
+            os.remove(destination)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def _decompress_ramdisk(compressed, destination, comp):
+    """Expand *compressed* into *destination* according to the detected format."""
+    if comp == 'zstd':
+        return _decompress_zstd(compressed, destination)
+    return call(['magiskboot', 'decompress', str(compressed), str(destination)]) == 0
+
+
 # Low-level magiskboot unpack and ramdisk extraction.
 def unpackboot(file, distance):
     """Unpack a boot image into a staging directory and report success."""
@@ -30,16 +74,11 @@ def unpackboot(file, distance):
 
         comp = get_file_type(str(ramdisk))
         print(f"Ramdisk is {comp}")
-        (work_dir / 'comp').write_text(comp, encoding='utf-8')
+        (work_dir / 'comp').write_text(_repack_compression(comp), encoding='utf-8')
         if comp != 'unknown':
             compressed_ramdisk = work_dir / 'ramdisk.cpio.comp'
             os.replace(ramdisk, compressed_ramdisk)
-            if call([
-                'magiskboot',
-                'decompress',
-                str(compressed_ramdisk),
-                str(ramdisk),
-            ]) != 0:
+            if not _decompress_ramdisk(compressed_ramdisk, ramdisk, comp):
                 print("Decompress Ramdisk Fail...")
                 return False
 

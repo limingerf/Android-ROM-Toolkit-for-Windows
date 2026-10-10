@@ -573,8 +573,12 @@ class _SparseRawCache:
     @classmethod
     def acquire(cls, source_abs, raw_path):
         """Return the shared raw path for source_abs, registering it if new."""
-        if source_abs in cls._entries:
-            return cls._entries[source_abs]
+        cached = cls._entries.get(source_abs)
+        if cached is not None and os.path.isfile(cached):
+            return cached
+        # The docstring promised "the raw file must still exist on disk", but a
+        # stale entry was handed back anyway, so the caller opened a missing
+        # file.  Re-register the freshly converted path instead.
         cls._entries[source_abs] = raw_path
         return raw_path
 
@@ -693,10 +697,22 @@ class LpUnpack:
             raise LpUnpackError(f'Partition output escapes destination: {name!r}')
         if os.path.lexists(out_file) and os.path.islink(out_file):
             raise LpUnpackError(f'Partition output cannot be a symbolic link: {out_file}')
-        with open(out_file, 'wb') as out:
-            for part in unpack_job.parts:
-                offset, size = part
-                self._write_extent_to_file(out, offset, size, unpack_job.geometry.logical_block_size)
+        # Write through a temporary file: an exception part-way through the
+        # extent loop used to leave a truncated .img that later steps accepted
+        # as a real partition image.
+        temporary = out_file + '.art-partial'
+        try:
+            with open(temporary, 'wb') as out:
+                for part in unpack_job.parts:
+                    offset, size = part
+                    self._write_extent_to_file(out, offset, size, unpack_job.geometry.logical_block_size)
+            os.replace(temporary, out_file)
+        except BaseException:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            raise
 
         print(f'Done:[{dti() - start}]')
 

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from Scripts.Primary.Utils import V
+from Scripts.Primary.WorkSpace import classify_ota_parts
 
 YELLOW = '\x1b[1;33m'
 GREEN = '\x1b[1;32m'
@@ -12,6 +13,21 @@ BOLD = '\x1b[1m'
 CLOSE = '\x1b[0m'
 
 KEY_FILES = ('avb.key', 'ota.key', 'avb_pkmd.bin', 'ota.crt')
+
+
+def _prompt(message, default=''):
+    """Read one line for the interactive CLI.
+
+    The GUI and worker entry points run with ``V.JM`` set and have no console to
+    answer on, so a prompt must return its "skip"/"cancel" answer instead of
+    blocking the process.  A closed stdin gets the same treatment.
+    """
+    if getattr(V, 'JM', False):
+        return default
+    try:
+        return input(message)
+    except EOFError:
+        return default
 
 
 # OTA key management and avbroot command execution.
@@ -92,7 +108,7 @@ def _generate_keys():
         return
 
     d.mkdir(parents=True, exist_ok=True)
-    passphrase = input('\n  请输入密钥密码：').strip()
+    passphrase = _prompt('\n  请输入密钥密码：').strip()
 
     # Write passphrase.txt first and pass it with --pass-file to avoid interaction.
     pass_file = _write_pass_file(d, passphrase)
@@ -173,7 +189,7 @@ def _select_ota():
     sf = _select_file()
     if not sf:
         print(f'> {RED}无法获取 stock-zip 目录{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     zips = _list_zips()
@@ -181,13 +197,13 @@ def _select_ota():
     if len(zips) == 0:
         sf.write_text('', encoding='utf-8')
         print(f'> {YELLOW}OTA_WORK/stock-zip 内未发现任何 zip 包{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     if len(zips) == 1:
         sf.write_text(zips[0], encoding='utf-8')
         print(f'> {GREEN}已选择：{zips[0]}{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     print()
@@ -197,20 +213,20 @@ def _select_ota():
         print(f'  {i:>4}      {name}')
 
     print(f'\n  请输入目标OTA包序号：')
-    ans = input('> ').strip()
+    ans = _prompt('> ').strip()
     if not ans.isdigit():
         print(f'> {RED}无效输入{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
     idx = int(ans)
     if idx < 1 or idx > len(zips):
         print(f'> {RED}无效序号: {idx}{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     sf.write_text(zips[idx - 1], encoding='utf-8')
     print(f'> {GREEN}已选择：{zips[idx - 1]}{CLOSE}')
-    input('> 按回车继续')
+    _prompt('> 按回车继续')
 
 
 def _inputimg_dir():
@@ -223,6 +239,11 @@ def _list_input_imgs():
     if not d or not d.is_dir():
         return []
     return sorted(f.name for f in d.iterdir() if f.suffix.lower() == '.img' and f.is_file())
+
+
+def _classify_parts(imgs, ota_parts_set):
+    """Backwards-compatible alias for the shared classifier."""
+    return classify_ota_parts(imgs, ota_parts_set)
 
 
 def _get_ota_parts(zip_path):
@@ -306,32 +327,32 @@ def _patch_ota_disable_avb():
     zip_name = _selected_zip()
     if not zip_name:
         print(f'> {RED}请先选择 OTA 包{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     sd = _stockzip_dir()
     zip_path = sd / zip_name
     if not zip_path.is_file():
         print(f'> {RED}OTA 包不存在：{zip_name}{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     kd = _signkey_dir()
     if not kd:
         print(f'> {RED}无法获取签名密钥目录{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
     ota_key = kd / 'ota.key'
     ota_crt = kd / 'ota.crt'
     if not ota_key.is_file() or not ota_crt.is_file():
         print(f'> {RED}请先生成密钥{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     imgs = _list_input_imgs()
     if not imgs:
         print(f'> {YELLOW}OTA_WORK/input-img 内未发现任何 .img 文件{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     # Get partitions already present in the OTA.
@@ -339,29 +360,22 @@ def _patch_ota_disable_avb():
         ota_parts = _get_ota_parts(zip_path)
     except (RuntimeError, OSError) as error:
         print(f'> {RED}{error}{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
     ota_parts_set = set(ota_parts)
 
     # Classify partitions as replacements or additions.
-    replace_parts = []
-    new_parts = []
-    for img_name in imgs:
-        part_name = img_name.rsplit('.', 1)[0]
-        if part_name in ota_parts_set:
-            replace_parts.append((part_name, img_name))
-        else:
-            new_parts.append((part_name, img_name, None))
+    replace_parts, new_parts = _classify_parts(imgs, ota_parts_set)
 
     # Ask for new partition sizes and super mode.
     super_names = []
     if new_parts:
         print(f'\n  将要添加的新分区：{",".join(name for name, _, _ in new_parts)}')
         for i, (part_name, img_name, _) in enumerate(new_parts):
-            size_str = input(f'\n  请输入 {part_name} 大小(B)，留空跳过：').strip()
+            size_str = _prompt(f'\n  请输入 {part_name} 大小(B)，留空跳过：').strip()
             if size_str:
                 new_parts[i] = (part_name, img_name, size_str)
-        super_input = input(f'\n  请输入新分区内属于 super 逻辑分区的分区名（逗号分隔，留空跳过）：').strip()
+        super_input = _prompt(f'\n  请输入新分区内属于 super 逻辑分区的分区名（逗号分隔，留空跳过）：').strip()
         if super_input:
             for name in super_input.replace('，', ',').split(','):
                 name = name.strip()
@@ -372,7 +386,7 @@ def _patch_ota_disable_avb():
         cmd, output_name = _build_patch_cmd(zip_path, kd, replace_parts, new_parts, super_names, disable_avb=True)
     except (ValueError, RuntimeError, OSError) as error:
         print(f'> {RED}{error}{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
     cmd.extend(['--disable-avb', '--skip-system-ota-cert', '--rootless'])
 
@@ -393,7 +407,7 @@ def _patch_ota_disable_avb():
     else:
         print(f'\n{RED}> 修补失败{CLOSE}')
 
-    input('> 按回车继续')
+    _prompt('> 按回车继续')
 
 
 # Patch OTA and apply AVB signing.
@@ -403,33 +417,33 @@ def _patch_ota_with_avb():
     zip_name = _selected_zip()
     if not zip_name:
         print(f'> {RED}请先选择 OTA 包{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     sd = _stockzip_dir()
     zip_path = sd / zip_name
     if not zip_path.is_file():
         print(f'> {RED}OTA 包不存在：{zip_name}{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     kd = _signkey_dir()
     if not kd:
         print(f'> {RED}无法获取签名密钥目录{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
     ota_key = kd / 'ota.key'
     ota_crt = kd / 'ota.crt'
     avb_key = kd / 'avb.key'
     if not ota_key.is_file() or not ota_crt.is_file() or not avb_key.is_file():
         print(f'> {RED}请先生成密钥（需要 avb.key + ota.key + ota.crt）{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     imgs = _list_input_imgs()
     if not imgs:
         print(f'> {YELLOW}OTA_WORK/input-img 内未发现任何 .img 文件{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     # Get partitions already present in the OTA.
@@ -437,29 +451,22 @@ def _patch_ota_with_avb():
         ota_parts = _get_ota_parts(zip_path)
     except (RuntimeError, OSError) as error:
         print(f'> {RED}{error}{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
     ota_parts_set = set(ota_parts)
 
     # Classify partitions as replacements or additions.
-    replace_parts = []
-    new_parts = []
-    for img_name in imgs:
-        part_name = img_name.rsplit('.', 1)[0]
-        if part_name in ota_parts_set:
-            replace_parts.append((part_name, img_name))
-        else:
-            new_parts.append((part_name, img_name, None))
+    replace_parts, new_parts = _classify_parts(imgs, ota_parts_set)
 
     # Ask for new partition sizes and super mode.
     super_names = []
     if new_parts:
         print(f'\n  将要添加的新分区：{",".join(name for name, _, _ in new_parts)}')
         for i, (part_name, img_name, _) in enumerate(new_parts):
-            size_str = input(f'\n  请输入 {part_name} 大小(B)，留空跳过：').strip()
+            size_str = _prompt(f'\n  请输入 {part_name} 大小(B)，留空跳过：').strip()
             if size_str:
                 new_parts[i] = (part_name, img_name, size_str)
-        super_input = input(f'\n  请输入新分区内属于 super 逻辑分区的分区名（逗号分隔，留空跳过）：').strip()
+        super_input = _prompt(f'\n  请输入新分区内属于 super 逻辑分区的分区名（逗号分隔，留空跳过）：').strip()
         if super_input:
             for name in super_input.replace('，', ',').split(','):
                 name = name.strip()
@@ -470,7 +477,7 @@ def _patch_ota_with_avb():
         cmd, output_name = _build_patch_cmd(zip_path, kd, replace_parts, new_parts, super_names)
     except (ValueError, RuntimeError, OSError) as error:
         print(f'> {RED}{error}{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
     cmd.extend(['--rootless'])
 
@@ -495,7 +502,7 @@ def _patch_ota_with_avb():
     else:
         print(f'\n{RED}> 修补失败{CLOSE}')
 
-    input('> 按回车继续')
+    _prompt('> 按回车继续')
 
 
 def _list_verify_zips():
@@ -512,7 +519,7 @@ def _list_verify_zips():
 def _ask_zip_path():
     """Ask for a zip path. Empty cancels."""
     while True:
-        raw = input('\n  zip 路径（绝对路径，留空取消）>> ').strip()
+        raw = _prompt('\n  zip 路径（绝对路径，留空取消）>> ').strip()
         if not raw:
             return None
         p = Path(raw)
@@ -540,7 +547,7 @@ def _pick_verify_zip():
         print(f'  {i:>4}      {name}')
 
     print(f'\n  请输入要验证的OTA包序号：')
-    ans = input('> ').strip()
+    ans = _prompt('> ').strip()
     if not ans.isdigit():
         print(f'> {RED}无效输入{CLOSE}')
         return None
@@ -556,11 +563,11 @@ def _verify_ota():
     """[05] Verify OTA zip signatures with avbroot ota verify."""
     zip_path = _pick_verify_zip()
     if not zip_path:
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
     if not zip_path.is_file():
         print(f'> {RED}OTA 包不存在：{zip_path.name}{CLOSE}')
-        input('> 按回车继续')
+        _prompt('> 按回车继续')
         return
 
     cmd = ['ota', 'verify', '--input', str(zip_path)]
@@ -590,7 +597,7 @@ def _verify_ota():
         print(f'\n{GREEN}> 验证通过{CLOSE}')
     else:
         print(f'\n{RED}> 验证失败{CLOSE}')
-    input('> 按回车继续')
+    _prompt('> 按回车继续')
 
 
 # Show OTA keys, source ZIPs, and workspace status.
@@ -644,9 +651,9 @@ def main():
 
         print()
         VALID = {'00', '0', '01', '1', '02', '2', '03', '3', '04', '4', '05', '5', '06', '6', '07', '7'}
-        choice = input(f'> {RED}输入序号{CLOSE} >> ').strip()
+        choice = _prompt(f'> {RED}输入序号{CLOSE} >> ').strip()
         if choice not in VALID:
-            input(f'> 无效序号: {choice}')
+            _prompt(f'> 无效序号: {choice}')
             continue
         if choice in ('00', '0'):
             return
@@ -671,7 +678,7 @@ def main():
             _select_ota()
             continue
         else:
-            input(f'> 无效序号: {choice}')
+            _prompt(f'> 无效序号: {choice}')
 
 
 if __name__ == '__main__':

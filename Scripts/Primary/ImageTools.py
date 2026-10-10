@@ -287,28 +287,28 @@ def raw_to_sparse(source, destination=None, block_size=4096, temp_dir=None):
 # ---------------------------------------------------------------------------
 # ═══════════════════════════════════════════════════════════════════════
 
+# Magic bytes in match order.  Formats that share a magic can only be reported
+# as the first matching entry, so duplicates are deliberately absent: zopfli
+# emits a gzip stream, and Magisk's lz4_lg carries the lz4_legacy magic.
 _FILE_SIGNATURES = (
     [b'PK', "zip"], [b'OPPOENCRYPT!', "ozip"], [b'7z', "7z"],
     [b'\x53\xef', 'ext', 1080],
     [b'\x3a\xff\x26\xed', "sparse"],
     [b'\xe2\xe1\xf5\xe0', "erofs", 1024],
     [b"CrAU", "payload"], [b"AVB0", "vbmeta"],
-    [b'\xd7\xb7\xab\x1e', "dtbo"], [b'(\xb5/\xfd', 'zst'],
-    [b'\xd0\x0d\xfe\xed', "dtb"], [b"MZ", "exe"], [b".ELF", 'elf'],
+    [b'\xd7\xb7\xab\x1e', "dtbo"], [b'\x28\xb5\x2f\xfd', 'zstd'],
+    [b'\xd0\x0d\xfe\xed', "dtb"], [b"MZ", "exe"], [b'\x7fELF', 'elf'],
     [b"ANDROID!", "boot"], [b"VNDRBOOT", "vendor_boot"],
     [b'AVBf', "avb_foot"], [b'BZh', "bzip2"],
     [b'CHROMEOS', 'chrome'], [b'\x1f\x8b', "gzip"],
     [b'\x1f\x9e', "gzip"],
     [b'\x02\x21\x4c\x18', "lz4_legacy"],
     [b'\x03\x21\x4c\x18', 'lz4'], [b'\x04\x22\x4d\x18', 'lz4'],
-    [b'\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\x03', "zopfli"],
     [b'\xfd7zXZ', 'xz'],
     [b']\x00\x00\x00\x04\xff\xff\xff\xff\xff\xff\xff\xff', 'lzma'],
-    [b'\x02!L\x18', 'lz4_lg'],
     [b'\x89PNG', 'png'], [b"LOGO!!!!", 'logo'],
     [b'\x67\x44\x6c\x61', 'super', 4096],
     [b'\x10\x20\xF5\xF2', 'f2fs', 1024],
-    [b'\x28\xb5\x2f\xfd', 'zstd'],
 )
 
 

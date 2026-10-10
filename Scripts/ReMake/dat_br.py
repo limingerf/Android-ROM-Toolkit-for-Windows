@@ -158,7 +158,10 @@ class HeapItem(object):
         self.item = None
 
     def __bool__(self):
-        return self.item is None
+        # A live entry must be truthy: FindVertexSequence pops in a loop with
+        # `if u and u.item in G`, so the inverted test made that loop drain the
+        # heap and heappop raise IndexError.
+        return self.item is not None
 
     def __eq__(self, other):
         return self.score == other.score
@@ -1176,11 +1179,22 @@ def _image_to_dat(input_image, outdir='.', version=None, prefix='system'):
         os.makedirs(outdir)
 
     output_prefix = outdir + '/' + prefix
-    BlockImageDiff(
-        SparseMap.SparseImage(input_image, tempfile.mkstemp()[1], '0'),
-        None,
-        version,
-    ).Compute(output_prefix)
+    # mkstemp() returns (fd, path): dropping the fd leaked one descriptor per
+    # DAT build, and the empty map file was never reclaimed either.
+    map_fd, file_map_path = tempfile.mkstemp()
+    os.close(map_fd)
+    # SparseImage keeps the source image open.  Leaving that to garbage
+    # collection held the handle (and its Windows file lock) while the caller
+    # removed the image, and raised ResourceWarning.
+    target = SparseMap.SparseImage(input_image, file_map_path, '0')
+    try:
+        BlockImageDiff(target, None, version).Compute(output_prefix)
+    finally:
+        target.simg_f.close()
+        try:
+            os.unlink(file_map_path)
+        except OSError:
+            pass
 
     print('Done! Output files: %s' % os.path.dirname(output_prefix))
 

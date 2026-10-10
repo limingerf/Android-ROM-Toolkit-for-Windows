@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import sys
 from pathlib import Path
@@ -92,7 +94,16 @@ class McpServer:
         return self.result(operations[name]())
 
     def handle(self, request):
+        if not isinstance(request, dict):
+            return {"jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32600, "message": "请求必须是 JSON 对象"}}
         method, request_id = request.get("method"), request.get("id")
+        if not isinstance(method, str):
+            # Otherwise method.startswith() raised AttributeError, which serve()
+            # reported as a parse error (-32700) with a null id instead of an
+            # invalid request (-32600) carrying the id the client is waiting on.
+            return {"jsonrpc": "2.0", "id": request_id,
+                    "error": {"code": -32600, "message": "缺少 method 字段"}}
         if method.startswith("notifications/"):
             return None
         if method == "initialize":
@@ -104,7 +115,12 @@ class McpServer:
         elif method == "tools/call":
             params = request.get("params") or {}
             try:
-                result = self.call(params.get("name", ""), params.get("arguments") or {})
+                # Tool code (native toolchain bootstrap, progress callbacks)
+                # prints to stdout, and stdout is the JSON-RPC channel here: a
+                # single stray line makes the client drop the session.  Send
+                # everything a tool prints to stderr instead.
+                with contextlib.redirect_stdout(sys.stderr):
+                    result = self.call(params.get("name", ""), params.get("arguments") or {})
             except Exception as error:
                 return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": str(error)}}
         else:
@@ -112,6 +128,9 @@ class McpServer:
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
     def serve(self):
+        # Bind the protocol channel once so redirected prints can never land in
+        # the JSON-RPC stream.
+        protocol_out = sys.stdout
         for line in sys.stdin:
             if not line.strip():
                 continue
@@ -120,111 +139,133 @@ class McpServer:
             except Exception as error:
                 response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(error)}}
             if response is not None:
-                print(json.dumps(response, ensure_ascii=False, separators=(",", ":")), flush=True)
+                print(json.dumps(response, ensure_ascii=False, separators=(",", ":")),
+                      file=protocol_out, flush=True)
 
 
 def main(root=None):
     root_path = root or Path(__file__).resolve().parent.parent
     if FastMCP is not None:
         server = FastMCP("art-rom-toolkit")
+        # FastMCP never forwards a version to the low-level server, so the
+        # initialize response reported the mcp package version instead of ours.
+        server._mcp_server.version = APP_VERSION
         controller = ArtController(root_path)
 
-        @server.tool()
+        def quiet_tool(*args, **kwargs):
+            """Register a tool whose stdout can never corrupt the JSON-RPC stream.
+
+            The stdio transport writes JSON-RPC to stdout, and library code
+            (native toolchain bootstrap, tool progress callbacks) prints there
+            too, so every tool body runs with stdout redirected to stderr.
+            """
+            register = server.tool(*args, **kwargs)
+
+            def decorate(function):
+                @functools.wraps(function)
+                def guarded(*call_args, **call_kwargs):
+                    with contextlib.redirect_stdout(sys.stderr):
+                        return function(*call_args, **call_kwargs)
+                return register(guarded)
+
+            return decorate
+
+        @quiet_tool()
         def art_toolchain_status() -> dict:
             return controller.toolchain_status()
 
-        @server.tool()
+        @quiet_tool()
         def art_list_projects() -> list[dict]:
             return controller.list_projects()
 
-        @server.tool()
+        @quiet_tool()
         def art_create_project(name: str) -> dict:
             return controller.create_project(name)
 
-        @server.tool()
+        @quiet_tool()
         def art_inspect_input(path: str) -> dict:
             return controller.inspect_input(path)
 
-        @server.tool()
+        @quiet_tool()
         def art_import_inputs(project: str, sources: list[str]) -> list[str]:
             return controller.import_inputs(project, sources)
 
-        @server.tool()
+        @quiet_tool()
         def art_import_rom_zip(project: str, path: str) -> list[str]:
             return controller.import_rom_archive(project, path)
 
-        @server.tool()
+        @quiet_tool()
         def art_extract_images(project: str, sources: list[str] | None = None) -> dict:
             return controller.extract_images(project, sources)
 
-        @server.tool()
+        @quiet_tool()
         def art_repack_partition(project: str, partition: str, target: str = "img", sparse: bool = False) -> dict:
             return controller.run_job("repack", project=project, partition=partition, target=target, sparse=sparse)
 
-        @server.tool()
+        @quiet_tool()
         def art_repack_super(project: str, sources: list[str], super_type: int = 0, sparse: bool = False) -> dict:
             return controller.repack_super(project, sources, super_type, sparse)
 
-        @server.tool()
+        @quiet_tool()
         def art_list_outputs(project: str) -> list[dict]:
             return controller.list_outputs(project)
 
-        @server.tool()
+        @quiet_tool()
         def art_delete_project(project: str) -> dict:
             return controller.delete_project(project)
 
-        @server.tool()
+        @quiet_tool()
         def art_get_settings() -> dict:
             return controller.get_settings()
 
-        @server.tool()
+        @quiet_tool()
         def art_update_settings(updates: dict) -> dict:
             return controller.update_settings(updates)
 
-        @server.tool()
+        @quiet_tool()
         def art_payload_partitions(project: str, source: str) -> list[dict]:
             return controller.payload_partitions(project, source)
 
-        @server.tool()
+        @quiet_tool()
         def art_super_partitions(project: str, source: str) -> list[str]:
             return controller.super_partitions(project, source)
 
-        @server.tool()
+        @quiet_tool()
         def art_avb_info(image: str) -> dict:
             return controller.avb_info(image)
 
-        @server.tool()
+        @quiet_tool()
         def art_avb_verify(image: str) -> dict:
             return controller.avb_verify(image)
 
-        @server.tool()
+        @quiet_tool()
         def art_avb_erase_footer(image: str, output: str | None = None) -> dict:
             return controller.avb_erase_footer(image, output)
 
-        @server.tool()
+        @quiet_tool()
         def art_avb_add_footer(image: str, kind: str = "hash", key: str | None = None,
                                partition_name: str | None = None, partition_size: int | None = None,
                                output: str | None = None) -> dict:
             return controller.avb_add_footer(image, kind=kind, key=key, partition_name=partition_name,
                                              partition_size=partition_size, output=output)
 
-        @server.tool()
+        @quiet_tool()
         def art_ota_status(project: str) -> dict:
             return controller.ota_status(project)
 
-        @server.tool()
+        @quiet_tool()
         def art_ota_select(project: str, name: str) -> dict:
             return controller.ota_select_zip(project, name)
 
-        @server.tool()
+        @quiet_tool()
         def art_ota_verify(project: str, archive: str | None = None) -> dict:
             return controller.ota_verify(project, archive)
 
-        @server.tool()
+        @quiet_tool()
         def art_ota_generate_keys(project: str, passphrase: str = "") -> dict:
             return controller.ota_generate_keys(project, passphrase)
 
-        @server.tool()
+        @quiet_tool()
         def art_ota_patch(project: str, disable_avb: bool = False,
                           super_partitions: list[str] | None = None,
                           partition_sizes: dict | None = None) -> dict:
@@ -232,15 +273,15 @@ def main(root=None):
                                         super_partitions=super_partitions,
                                         partition_sizes=partition_sizes)
 
-        @server.tool()
+        @quiet_tool()
         def art_list_plugins() -> list[dict]:
             return controller.list_plugins()
 
-        @server.tool()
+        @quiet_tool()
         def art_install_plugin(source: str, replace: bool = True) -> dict:
             return controller.install_plugin(source, replace=replace)
 
-        @server.tool()
+        @quiet_tool()
         def art_remove_plugin(name: str) -> dict:
             return controller.remove_plugin(name)
 

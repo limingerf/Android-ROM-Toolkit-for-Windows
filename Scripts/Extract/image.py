@@ -19,7 +19,7 @@ import time
 from glob import glob
 from pathlib import Path
 
-from Scripts.Primary.Utils import V, RED, CLOSE
+from Scripts.Primary.Utils import V, RED, CLOSE, remove_tree
 from Scripts.Primary.Console import display
 from Scripts.Primary.ImageTools import get_file_type
 from Scripts.Primary.WorkSpace import LayoutError
@@ -65,7 +65,10 @@ def _fast_ext4_extract(source, partition, destination):
             return False
         inode_count = struct.unpack_from('<I', superblock, 0)[0]
         block_size = 1024 << struct.unpack_from('<I', superblock, 0x18)[0]
-        per_group = struct.unpack_from('<I', superblock, 0x28)[0]
+        # 'c' is s_blocks_per_group (offset 32), matching the pure Python
+        # extractor.  It used to be read from 0x28, which is
+        # s_inodes_per_group, so the two writers disagreed on the same key.
+        per_group = struct.unpack_from('<I', superblock, 0x20)[0]
         label = bytes(superblock[0x78:0x88]).rstrip(b'\0').decode('utf-8', 'replace')
         (config / f'{partition}_info.txt').write_text(json.dumps({
             'a': inode_count, 'b': block_size, 'c': per_group,
@@ -75,7 +78,7 @@ def _fast_ext4_extract(source, partition, destination):
         destination = Path(destination)
         if destination.exists() or destination.is_symlink():
             if destination.is_dir() and not destination.is_symlink():
-                shutil.rmtree(destination)
+                remove_tree(destination)
             else:
                 destination.unlink()
         os.replace(output, destination)
@@ -87,7 +90,7 @@ def _fast_ext4_extract(source, partition, destination):
     except (OSError, ValueError, struct.error, UnicodeError):
         return False
     finally:
-        shutil.rmtree(work_root, ignore_errors=True)
+        remove_tree(work_root, ignore_errors=True)
 
 
 # Single-image format dispatcher.
@@ -103,7 +106,10 @@ def decompress_img(source, distance=None, keep=1):
         print(f'> 不支持的镜像类型: {source_type}')
         return False
     if os.path.basename(source) in ('dsp.img', 'exaid.img', 'cust.img'):
-        return
+        # Deliberate skip, not a failure: the worker aborts the whole job when
+        # this dispatcher returns a falsy value.
+        print(f'> 跳过不支持的镜像: {os.path.basename(source)}')
+        return True
 
     try:
         working_source = _stage_work_source(source, 'image')
@@ -256,7 +262,7 @@ def extract_zrom(rom):
             payload_files[0],
             flag=input(f'> {RED}选择提取方式:  [0]全盘提取  [1]指定镜像{CLOSE} >> '),
         )
-        shutil.rmtree(import_dir, ignore_errors=True)
+        remove_tree(import_dir, ignore_errors=True)
         return
 
     dat_br_files = sorted(glob(os.path.join(import_dir, '**', '*.new.dat.br'), recursive=True))
@@ -271,8 +277,8 @@ def extract_zrom(rom):
         infile, able = img_files, 4
     else:
         input('> 仅支持含有payload.bin/*.new.dat/*.new.dat.br/*.img的zip固件')
-        shutil.rmtree(import_dir, ignore_errors=True)
+        remove_tree(import_dir, ignore_errors=True)
         return
 
     decompress(infile, able)
-    shutil.rmtree(import_dir, ignore_errors=True)
+    remove_tree(import_dir, ignore_errors=True)

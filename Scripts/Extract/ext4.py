@@ -7,6 +7,7 @@ can be used without importing any other A.R.T Python module.
 import ctypes
 from functools import cmp_to_key
 import io
+import os
 import queue
 import shutil
 
@@ -23,6 +24,25 @@ def wcs_cmp(str_a, str_b):
 
 class Ext4Error(Exception):
     ...
+
+
+def capability_field(value):
+    """Decode a ``security.capability`` xattr into the fs_config hex field.
+
+    The attribute is 12 bytes (v1), 20 (v2) or 24 (v3), so the old fixed
+    ``struct.unpack('<5I')`` raised struct.error for v1 and v3 entries and
+    aborted the whole extraction.  Returns None when the value is unusable.
+    """
+    if len(value) >= 20:
+        _, low, inherit_low, high, _ = struct.unpack('<5I', value[:20])
+    elif len(value) >= 12:
+        _, low, inherit_low = struct.unpack('<3I', value[:12])
+        high = 0
+    else:
+        return None
+    if low > 65535:
+        return hex(int(f'{high:04x}{low:04x}', 16))
+    return hex(int(f'{high:04x}{inherit_low:04x}{low:04x}', 16))
 
 
 class EndOfStreamError(Ext4Error):
@@ -807,7 +827,7 @@ class Inode:
                 try:
                     for xattr_name, xattr_value in self._parse_xattrs(inline_data[offset:], 0):
                         yield xattr_name, xattr_value
-                except (ValueError, IndexError, struct.error) as error:
+                except (ValueError, IndexError, struct.error, Ext4Error) as error:
                     print(f'Invalid inline xattrs for inode {self.inode_idx}: {error}')
         # xattr block(s)
         if check_block and self.inode.i_file_acl != 0:
@@ -819,18 +839,23 @@ class Inode:
                     # Perhaps you think this code is a bit foolish, but that's all others can do
                     print(f"Invalid magic value in xattrs block header at offset 0x{xattrs_block_start:X} of "
                           f"inode {self.inode_idx:d}: 0x{xattrs_header.h_magic} (expected 0xEA020000)")
-                    return '', ''
+                    return
 
                 if xattrs_header.h_blocks != 1:
                     print(f"Invalid number of xattr blocks at offset 0x{xattrs_block_start:X} "
                           f"of inode {self.inode_idx:d}: {xattrs_header.h_blocks:d} (expected 1)")
-                    return '', ''
+                    return
 
             offset = 4 * ((ctypes.sizeof(
                 ext4_xattr_header) + 3) // 4)
             # The ext4_xattr_entry following the header is aligned on a 4-byte boundary
-            for xattr_name, xattr_value in self._parse_xattrs(xattrs_block[offset:], -offset):
-                yield xattr_name, xattr_value
+            # A malformed block must not abort the extraction: the inline branch
+            # was already guarded, this one was not.
+            try:
+                for xattr_name, xattr_value in self._parse_xattrs(xattrs_block[offset:], -offset):
+                    yield xattr_name, xattr_value
+            except (ValueError, IndexError, struct.error, Ext4Error) as error:
+                print(f'Invalid xattr block for inode {self.inode_idx}: {error}')
 
 
 class BlockReader:
@@ -1218,7 +1243,7 @@ class ULTRAMAN(object):
             raise ImageExtractionError(f'EXT4 superblock 被截断: {self.OUTPUT_IMAGE_FILE}')
         inode_count = struct.unpack_from('<L', superblock, 0)[0]
         block_size = 1024 << struct.unpack_from('<L', superblock, 24)[0]
-        per_group = struct.unpack_from('<L', superblock, 32)[0]
+        per_group = struct.unpack_from('<L', superblock, 32)[0]  # s_blocks_per_group
         label = bytes(superblock[120:136]).rstrip(b'\x00').decode('utf-8', 'replace')
         manifest = {
             'a': inode_count,
@@ -1322,11 +1347,10 @@ class ULTRAMAN(object):
                             escaped = escaped.replace(character, '\\' + character)
                         self.contexts.append(f'/{escaped} {value.decode("utf-8").rstrip(chr(0))}')
                     elif attribute == 'security.capability':
-                        values = struct.unpack('<5I', value)
-                        if values[1] > 65535:
-                            capability = hex(int(f'{values[3]:04x}{values[1]:04x}', 16))
-                        else:
-                            capability = hex(int(f'{values[3]:04x}{values[2]:04x}{values[1]:04x}', 16))
+                        capability = capability_field(value)
+                        if capability is None:
+                            print(f'> 忽略异常的 security.capability ({len(value)} 字节): {fs_path}')
+                            continue
                         cap = f' capabilities={capability}'
 
                 if entry_inode.is_dir:
@@ -1401,20 +1425,42 @@ def _validate_partition(partition):
     return partition
 
 
+def _extended_path(path):
+    """Return a path Windows accepts beyond MAX_PATH.
+
+    This module deliberately imports no other A.R.T module, so the equivalent
+    helper in ``Scripts.Primary.Utils`` is duplicated here on purpose.
+    """
+    text = os.fspath(path)
+    if os.name != "nt" or text.startswith("\\\\?\\"):
+        return text
+    absolute = os.path.abspath(text)
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC" + absolute[1:]
+    return "\\\\?\\" + absolute
+
+
 def _prepare_partition_output(partition, destination):
     """Prepare the output and metadata directories without project imports."""
     _validate_partition(partition)
     output_dir = Path(destination)
-    if output_dir.is_symlink() or (output_dir.exists() and not output_dir.is_dir()):
+    target = _extended_path(output_dir)
+    if os.path.islink(target) or (os.path.exists(target) and not os.path.isdir(target)):
         raise ImageExtractionError(f"EXT4 输出目录无效: {output_dir}")
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=False)
+    if os.path.exists(target):
+        # A tree beyond MAX_PATH is invisible to the plain path checks and
+        # cannot be removed by a plain rmtree, so the removal was skipped and
+        # the mkdir below failed with WinError 3 when re-extracting a partition
+        # whose previous output tree was too long to address.
+        shutil.rmtree(target)
+    Path(target).mkdir(parents=True, exist_ok=False)
 
     config_dir = output_dir.parent / "config"
-    if config_dir.is_symlink() or (config_dir.exists() and not config_dir.is_dir()):
+    config_target = _extended_path(config_dir)
+    if os.path.islink(config_target) or (os.path.exists(config_target)
+                                         and not os.path.isdir(config_target)):
         raise ImageExtractionError(f"EXT4 metadata 目录无效: {config_dir}")
-    config_dir.mkdir(parents=True, exist_ok=True)
+    Path(config_target).mkdir(parents=True, exist_ok=True)
     return output_dir, config_dir
 
 

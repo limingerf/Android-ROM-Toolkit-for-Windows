@@ -34,9 +34,18 @@ def remove_generated_path(path: Path) -> None:
 def copy_release_resources(release_dir: Path) -> None:
     resource_source = ROOT / 'art-res'
     resource_target = release_dir / 'art-res'
+    # Created before the icons are copied: without art-res the old code raised
+    # FileNotFoundError instead of assembling the rest of the release.
+    resource_target.mkdir(parents=True, exist_ok=True)
     if resource_source.is_dir():
+        # Every bin-* directory must ship: the tool directory is resolved at
+        # runtime as art-res/bin-{arch} (WSL backend, runtime.py) and
+        # art-res/bin-win-{arch} (native backend), with _architecture()
+        # returning arm64 on Windows-on-ARM.  Dropping bin-arm64 would break
+        # the WSL backend there.
         shutil.copytree(resource_source, resource_target, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns('ui-settings.json', 'host-tools.local.json', '.wsl-ready-*'))
+                        ignore=shutil.ignore_patterns('ui-settings.json', 'host-tools.local.json',
+                                                      '.wsl-ready-*'))
     for icon_name in ('android-rom-toolkit.ico', 'android-rom-toolkit.png'):
         icon_source = ROOT / 'assets' / icon_name
         if icon_source.is_file():
@@ -58,6 +67,44 @@ def zip_release(release_dir: Path, archive_path: Path) -> int:
                 archive.write(source, source.relative_to(release_dir))
                 count += 1
     return count
+
+
+def _data_separator() -> str:
+    """PyInstaller separates an --add-data source and destination per platform.
+
+    POSIX builds need ":", the old code hard-coded ";" and so produced a broken
+    resource layout off Windows.
+    """
+    return ';' if os.name == 'nt' else ':'
+
+
+def pyinstaller_command(separator: str | None = None) -> list:
+    """Return the PyInstaller argv used to build the release executable."""
+    separator = separator or _data_separator()
+    return [
+        sys.executable, '-m', 'PyInstaller',
+        str(ROOT / 'Scripts' / 'main.py'),
+        '--onefile',
+        *(['--windowed'] if os.name == 'nt' else []),
+        '--name', 'art',
+        '--icon', str(ROOT / 'assets' / 'android-rom-toolkit.ico'),
+        '--add-data', f"{ROOT / 'assets' / 'android-rom-toolkit.ico'}{separator}assets",
+        '--add-data', f"{ROOT / 'assets' / 'android-rom-toolkit.png'}{separator}assets",
+        '--add-data', f"{ROOT / 'assets' / 'keys'}{separator}assets/keys",
+        '--distpath', str(DIST_DIR),
+        '--workpath', str(BUILD_DIR),
+        '--specpath', str(BUILD_DIR),
+        '--runtime-hook', str(ROOT / 'pyinstaller_hooks' / 'qt_icu_runtime.py'),
+        '--exclude-module', 'numpy',
+        '--hidden-import', 'Scripts.mcp_server',
+        '--hidden-import', 'Scripts.avbtool_windows',
+        '--hidden-import', 'Scripts.vendor.avbtool',
+        '--hidden-import', 'cryptography.hazmat.primitives.asymmetric.rsa',
+        '--hidden-import', 'mcp.server.fastmcp',
+        '--hidden-import', 'PySide6.QtCore',
+        '--hidden-import', 'PySide6.QtGui',
+        '--hidden-import', 'PySide6.QtWidgets',
+    ]
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,28 +136,7 @@ def main() -> None:
 
     log_file = ROOT / 'build-call.log'
     result = subprocess.run(
-        [sys.executable, '-m', 'PyInstaller',
-         str(ROOT / 'Scripts' / 'main.py'),
-         '--onefile',
-         *(['--windowed'] if os.name == 'nt' else []),
-         '--name', 'art',
-         '--icon', str(ROOT / 'assets' / 'android-rom-toolkit.ico'),
-         '--add-data', f"{ROOT / 'assets' / 'android-rom-toolkit.ico'};assets",
-         '--add-data', f"{ROOT / 'assets' / 'android-rom-toolkit.png'};assets",
-         '--add-data', f"{ROOT / 'assets' / 'keys'};assets/keys",
-         '--distpath', str(DIST_DIR),
-         '--workpath', str(BUILD_DIR),
-         '--specpath', str(BUILD_DIR),
-         '--runtime-hook', str(ROOT / 'pyinstaller_hooks' / 'qt_icu_runtime.py'),
-         '--exclude-module', 'numpy',
-         '--hidden-import', 'Scripts.mcp_server',
-         '--hidden-import', 'Scripts.avbtool_windows',
-         '--hidden-import', 'Scripts.vendor.avbtool',
-         '--hidden-import', 'cryptography.hazmat.primitives.asymmetric.rsa',
-         '--hidden-import', 'mcp.server.fastmcp',
-         '--hidden-import', 'PySide6.QtCore',
-         '--hidden-import', 'PySide6.QtGui',
-         '--hidden-import', 'PySide6.QtWidgets'],
+        pyinstaller_command(),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

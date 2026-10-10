@@ -259,7 +259,9 @@ def menu_main():
     from Scripts.ReMake.ext4 import recompress_ext4
     V.JM = True
     while True:
-        os.system("clear")
+        # The module already imports clear_console; os.system("clear") spawned a
+        # shell and printed "'clear' is not recognized" on Windows.
+        clear_console()
         print(f'\x1b[1;36m> 当前工程: \x1b[0m{V.project}')
         print('-------------------------------------------------------------\n')
         print('\x1b[0;31m\t   0 > 返回主菜单            66 > 退出工具\x1b[0m\n')

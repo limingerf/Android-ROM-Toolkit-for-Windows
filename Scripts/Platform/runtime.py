@@ -387,9 +387,29 @@ def _architecture() -> str:
 
 def windows_to_wsl(value: str | os.PathLike[str]) -> str:
     raw = os.fspath(value)
-    # Plain paths and --file-contexts=C:\... style options.
-    return re.sub(r"([A-Za-z]):[/\\]([^\r\n]*)",
-                  lambda m: "/mnt/" + m[1].lower() + "/" + m[2].replace("\\", "/"), raw)
+    original = raw
+    # \\?\ and \\.\ are Windows-only addressing prefixes that WSL rejects;
+    # leaving one in place produced paths such as "\\?\/mnt/c/...".
+    while raw[:4] in ("\\\\?\\", "\\\\.\\"):
+        raw = raw[4:]
+    # A UNC share has no WSL equivalent: drives are mounted as /mnt/<letter>.
+    # Report it here, with the remedy, instead of letting the tool inside WSL
+    # fail with a missing file.  \\?\UNC\server\share is the extended form.
+    if raw.startswith("\\\\") or raw[:4].lower() == "unc\\":
+        raise ToolchainError(
+            f"WSL 后端无法访问 UNC 路径：{original}；"
+            "请把共享映射为盘符后重试，或将工具后端切换为原生（ART_BACKEND=native）")
+    # Plain paths and --file-contexts=C:\... style options.  One drive prefix is
+    # rewritten per pass, so keep going: a shell command carries several paths,
+    # and a single greedy match used to consume the rest of the line and leave
+    # every later path unconverted (and therefore unusable inside WSL).
+    while True:
+        converted = re.sub(r"([A-Za-z]):[/\\]([^\r\n]*)",
+                           lambda m: "/mnt/" + m[1].lower() + "/" + m[2].replace("\\", "/"),
+                           raw, count=1)
+        if converted == raw:
+            return raw
+        raw = converted
 
 def clear_screen() -> None:
     if sys.stdout is not None and sys.stdout.isatty():
@@ -588,6 +608,9 @@ class Toolchain:
                 "\n  --add-partition PARTITION FILE [SIZE]\n"
                 "  --disable-avb\n"
                 "  --dynamic-partition PARTITION\n"
+                # A.R.T's historical spelling, and the flag the OTA code probes
+                # for before it will add logical partitions.
+                "  --super-mode PARTITION\n"
             )
             result.stdout = (result.stdout or "") + advertised
         return result
@@ -617,7 +640,15 @@ def detect_toolchain(root: str | os.PathLike[str], required=REQUIRED_TOOLS) -> T
     del required  # Check tools per operation, not at application startup.
     root = Path(root).resolve()
     config_path = root / "art-res" / "host-tools.local.json"
-    config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
+    config = {}
+    if config_path.is_file():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            # This runs while Scripts.Primary is imported, so a truncated file
+            # used to kill every entry point before any UI existed.  Report it
+            # on stderr - stdout may be an MCP JSON-RPC channel.
+            print(f"工具配置无法解析，已改用自动检测: {error}", file=sys.stderr)
     arch = _architecture()
     backend = os.environ.get("ART_BACKEND") or config.get("backend", "native")
     if os.name == "nt" and backend == "wsl":

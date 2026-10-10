@@ -80,8 +80,12 @@ def repack_super(selected_parts, super_type, super_sparse):
                         display(f'转换 sparse: {os.path.basename(b_path)} ...')
                         b_raw_path = os.path.join(V.workspace, f'.{os.path.basename(b_path)}.raw.img')
                         b_raw = sparse_to_raw(b_path, b_raw_path, temp_dir=V.workspace)
-                        if b_raw and os.path.isfile(b_raw):
-                            b_path = b_raw
+                        if not b_raw or not os.path.isfile(b_raw):
+                            # Handing the sparse container to lpmake would embed
+                            # its header as partition data and still "succeed".
+                            print(f'> 无法转换 sparse 镜像: {b_path}')
+                            return
+                        b_path = b_raw
                     size_b = os.path.getsize(b_path)
                     argvs.extend([
                         '--partition', f'{name}_b:readonly:{size_b}:{group_name}_b',

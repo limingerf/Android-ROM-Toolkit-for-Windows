@@ -13,7 +13,9 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from Scripts.Primary.Utils import LayoutError, PWD_DIR, V, get_dir_size, ceil
+from Scripts.Primary.Utils import (
+    LayoutError, PWD_DIR, V, get_dir_size, ceil, long_path_risk, remove_tree,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -125,7 +127,11 @@ class ProjectLayout:
             return "invalid"
 
         root_entries = tuple(self.project_dir.iterdir())
-        entries = {entry.name for entry in root_entries}
+        # Hidden entries are A.R.T's own transient state (job staging and
+        # publish transaction directories).  A leftover one must never make the
+        # project look unsupported: a stale `.art-backup-*` in the project root
+        # used to block every later operation with "不兼容的目录布局".
+        entries = {entry.name for entry in root_entries if not entry.name.startswith(".")}
         if entries - _ROOT_DIRS:
             return "unsupported"
         if any(entry.name in _ROOT_DIRS and (entry.is_symlink() or not entry.is_dir())
@@ -154,6 +160,13 @@ class ProjectLayout:
             raise UnsupportedLayoutError(
                 "检测到非 INPUT/OUT/WORKSPACE 工程目录结构；本版本不支持旧版或混合工程。"
             )
+
+        # Warn before a long extraction rather than failing part-way through:
+        # without the LongPathsEnabled policy a deep Android tree cannot be
+        # created at all below a long project root.
+        warning = long_path_risk(self.workspace_dir)
+        if warning:
+            print(f"> {warning}")
 
         self.project_dir.mkdir(parents=True, exist_ok=True)
         for path in self.required_dirs:
@@ -232,6 +245,40 @@ def partition_name(image_path):
     return ProjectLayout.validate_component(name, "分区")
 
 
+# Split staged images into OTA replacements and brand new partitions.
+def classify_ota_parts(image_names, ota_parts):
+    """Return (replace_parts, new_parts) for images staged against an OTA.
+
+    ``Path.stem`` and ``rsplit('.', 1)[0]`` turned ``system.sparse.img`` into
+    ``system.sparse`` and left the slot on ``system_a.img``; neither name is
+    listed by ``avbroot ota list``, so the partition the user meant to replace
+    was handed to avbroot as a brand new one instead.
+
+    replace_parts: [(ota_partition_name, image_name)]
+    new_parts:     [(partition_name, image_name, None)]
+    """
+    existing = {str(name).strip() for name in ota_parts}
+    replace_parts = []
+    new_parts = []
+    for image_name in image_names:
+        try:
+            part_name = partition_name(image_name)
+        except LayoutError:
+            part_name = os.path.basename(image_name).rsplit('.', 1)[0]
+        slot_less = part_name[:-2] if part_name.endswith(('_a', '_b')) else part_name
+        if part_name in existing:
+            target = part_name
+        elif slot_less in existing:
+            target = slot_less
+        else:
+            target = None
+        if target:
+            replace_parts.append((target, image_name))
+        else:
+            new_parts.append((part_name, image_name, None))
+    return replace_parts, new_parts
+
+
 def workspace_partition(partition):
     return str(V.layout.partition_dir(partition))
 
@@ -267,7 +314,7 @@ def create_partition_stage(partition, category, create_partition=True):
     config_dir = Path(V.config)
     config_dir.mkdir(parents=True, exist_ok=True)
     if partition_dir.exists():
-        shutil.rmtree(partition_dir)
+        remove_tree(partition_dir)
     if create_partition:
         partition_dir.mkdir(parents=True, exist_ok=True)
     return partition_dir.parent, partition_dir, config_dir
@@ -306,17 +353,30 @@ def _commit_extracted_partition(partition, stage_root, required_metadata, preser
 
 # Read previous image sizing metadata for repacking.
 def load_image_json(dumpinfo, source_dir):
-    with open(dumpinfo, "a+", encoding="utf-8") as f:
-        f.seek(0)
-        info = _json.load(f)
+    try:
+        # "a+" created the file when it was missing and needed write access;
+        # an empty or truncated file then aborted the repack with a bare
+        # JSONDecodeError traceback.
+        with open(dumpinfo, "r", encoding="utf-8") as f:
+            info = _json.load(f)
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f'镜像信息文件无法解析: {dumpinfo} ({error})') from error
+    if not isinstance(info, dict):
+        raise RuntimeError(f'镜像信息文件格式无效: {dumpinfo}')
+    missing = [key for key in ("a", "b", "c", "d", "s") if key not in info]
+    if missing:
+        raise RuntimeError(f'镜像信息文件缺少字段 {", ".join(missing)}: {dumpinfo}')
     inodes = info["a"]
     block_size = info["b"]
-    per_group = info["c"]
+    per_group = info["c"]  # s_blocks_per_group, currently unused by the callers
     mount_point = info["d"]
     if mount_point != "/":
         mount_point = "/" + mount_point
     fsize = info["s"]
-    blocks = ceil(int(fsize) / int(block_size))
+    try:
+        blocks = ceil(int(fsize) / int(block_size))
+    except (TypeError, ValueError, ZeroDivisionError) as error:
+        raise RuntimeError(f'镜像信息文件字段无效: {dumpinfo} ({error})') from error
     dsize = get_dir_size(source_dir)
     if dsize > int(fsize):
         minsize = dsize - int(fsize)

@@ -18,6 +18,70 @@ from Scripts.Platform.runtime import clear_screen, detect_toolchain
 class LayoutError(RuntimeError):
     """Base error for invalid project layouts and unsafe paths."""
 
+
+# ---------------------------------------------------------------------------
+# Windows long-path support
+# ---------------------------------------------------------------------------
+# MAX_PATH - 1: the limit that applies while the LongPathsEnabled policy is off
+# and no \\?\ prefix is used.  Measured on a real ColorOS system tree: the
+# deepest entry sits 155 characters below WORKSPACE, so a project root that is
+# already long leaves no room.
+LONG_PATH_LIMIT = 259
+TREE_MARGIN = 130
+
+
+def long_paths_enabled():
+    """Report whether Windows accepts paths longer than MAX_PATH."""
+    if os.name != "nt":
+        return True
+    cached = getattr(long_paths_enabled, "_cached", None)
+    if cached is not None:
+        return cached
+    enabled = False
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\FileSystem",
+        ) as key:
+            enabled = bool(winreg.QueryValueEx(key, "LongPathsEnabled")[0])
+    except (OSError, ImportError, ValueError):
+        enabled = False
+    long_paths_enabled._cached = enabled
+    return enabled
+
+
+def extended_path(path):
+    """Return a path Windows APIs accept beyond MAX_PATH.
+
+    Only absolute paths can carry the prefix and it disables "." / ".."
+    normalisation, so the value is normalised first.  Other platforms and
+    already-prefixed values are returned unchanged.
+    """
+    text = os.fspath(path)
+    if os.name != "nt" or text.startswith("\\\\?\\"):
+        return text
+    absolute = os.path.abspath(text)
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC" + absolute[1:]
+    return "\\\\?\\" + absolute
+
+
+def long_path_risk(root, margin=TREE_MARGIN):
+    """Return an actionable warning when a project root risks MAX_PATH."""
+    if long_paths_enabled():
+        return None
+    text = os.path.abspath(os.fspath(root))
+    if len(text) + margin <= LONG_PATH_LIMIT:
+        return None
+    return (
+        f"工程路径过长（{len(text)} 字符，加上目录树后可能超过 {LONG_PATH_LIMIT} 字符上限）："
+        f"{text}\n"
+        "  建议把工程移到更短的路径，或启用 Windows 长路径支持"
+        "（HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\\LongPathsEnabled 设为 1 后重启）。"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Runtime state and bundled external-tool paths
 # ---------------------------------------------------------------------------
@@ -152,7 +216,14 @@ def clear_console():
 # ---------------------------------------------------------------------------
 def get_dir_size(ddir, max_=1.06):
     size = 0
-    for (root, dirs, files) in os.walk(ddir):
+
+    def _report(error):
+        # os.walk() skips unreadable or unaddressable directories (a deep tree
+        # below a long root, for instance) without a word, which under-reported
+        # the size and could size the partition too small for its content.
+        print(f"> 无法统计目录大小: {getattr(error, 'filename', ddir)} ({error})")
+
+    for (root, dirs, files) in os.walk(ddir, onerror=_report):
         for name in files:
             file_path = os.path.join(root, name)
             if not os.path.islink(file_path):
@@ -174,10 +245,22 @@ def ceil(x):
     return int(x)
 
 
+def remove_tree(path, ignore_errors=False):
+    """Remove a tree that may live beyond MAX_PATH.
+
+    ``shutil.rmtree`` resolves the path itself, so a deep extraction tree below
+    a long project root could not be removed on Windows at all.
+    """
+    shutil.rmtree(extended_path(path), ignore_errors=ignore_errors)
+
+
 def rmdire(path):
-    if os.path.exists(path):
+    # A path beyond MAX_PATH is not visible to plain os.path.exists(), so the
+    # old check silently did nothing for a deep extracted tree.
+    target = extended_path(path)
+    if os.path.exists(target):
         try:
-            shutil.rmtree(path)
+            remove_tree(path)
         except PermissionError:
             print("无法删除文件夹，权限不足")
         else:

@@ -12,7 +12,7 @@ from Scripts.Primary.Utils import (
     ceil,
     get_dir_size,
 )
-from Scripts.Primary.FileConfigPatcher import patch_fsconfig
+from Scripts.Primary.FileConfigPatcher import patch_fsconfig, restore_symlinks
 from Scripts.Primary.Console import display
 from Scripts.Primary.WorkSpace import load_image_json
 from Scripts.ReMake.dat_br import recompress_dat_br
@@ -23,6 +23,40 @@ from Scripts.ReMake.metadata import normalize_metadata
 def walk_contexts(path):
     """Normalize generated metadata without changing rule order."""
     return normalize_metadata(path)
+
+
+# Restore symlinks and refuse to build an image that silently lost them.
+def _ensure_symlinks(source, fsconfig):
+    """Recreate symlinks the extraction could not create on Windows.
+
+    `e2fsdroid` derives the inode type from the source tree and ignores the link
+    target recorded in the fsconfig, so a workspace extracted without the
+    symbolic-link privilege repacks /bin, /etc, /init and hundreds of other
+    entries as regular files, which cannot boot.  Rebuilding the links is the
+    only way to keep the image faithful.
+    """
+    report = restore_symlinks(source, fsconfig)
+    if report["restored"] or report["failed"] or report["skipped"]:
+        display(
+            f"符号链接: 恢复 {report['restored']}，已存在 {report['present']}，"
+            f"跳过 {len(report['skipped'])}，失败 {len(report['failed'])}"
+        )
+    if not report["failed"]:
+        return
+    if V.SETUP_MANIFEST.get("ALLOW_SYMLINK_LOSS", "0") == "1":
+        display(
+            f"{RED}警告: {len(report['failed'])} 个符号链接未能恢复，"
+            f"这些路径会被回包成普通文件{CLOSE}"
+        )
+        return
+    preview = "；".join(report["failed"][:5])
+    raise RuntimeError(
+        f"{len(report['failed'])} 个符号链接无法在工作区恢复（{preview}）。"
+        "e2fsdroid 只依据源目录的文件类型生成 inode，并会忽略 fsconfig 中的链接目标，"
+        "继续回包会把 /bin、/etc、/init 等符号链接写成普通文件，刷入后无法开机。"
+        "请开启 Windows 开发者模式（或以管理员身份运行）后重新解包，或改用 WSL 后端；"
+        "确需保留当前结果请设置 ALLOW_SYMLINK_LOSS=1。"
+    )
 
 
 # Prepare sizes, timestamps, metadata, and output paths.
@@ -39,6 +73,7 @@ def _prepare(source, fsconfig, contexts, dumpinfo):
     patch_fsconfig(source, fsconfig)
     walk_contexts(fsconfig)
     walk_contexts(contexts)
+    _ensure_symlinks(source, fsconfig)
 
     timestamp = (
         int(time.time())
@@ -146,6 +181,11 @@ def _write_image(state, fsconfig, contexts, source, flag):
         return False
 
     print(" Done")
+    # A sparse file is far smaller than the image it describes, because
+    # img2simg keeps only the non-zero chunks.  Capture the real image size
+    # before any format conversion so the dynamic-partition op list and any
+    # later super composition see the truth rather than the file's byte count.
+    state["raw_size"] = os.path.getsize(new_distance)
     if V.SETUP_MANIFEST["REPACK_SPARSE_IMG"] == "1" or flag > 9:
         display("开始转换: sparse format ...")
         if call(["img2simg", new_distance, distance]) != 0:
@@ -166,7 +206,7 @@ def _write_image(state, fsconfig, contexts, source, flag):
 
 
 # Update dynamic-partition operation-list sizes.
-def _update_dynamic_partitions(label, distance):
+def _update_dynamic_partitions(label, distance, image_size=None):
     if not os.path.isfile(distance):
         print(f" {RED}打包失败{CLOSE}")
         return
@@ -177,30 +217,42 @@ def _update_dynamic_partitions(label, distance):
         if not os.path.isfile(new_op_list):
             shutil.copyfile(op_list, new_op_list)
     else:
+        # Honour the configured group name instead of assuming Qualcomm's.
+        group_name = V.SETUP_MANIFEST.get('GROUP_NAME') or 'qti_dynamic_partitions'
         content = "remove_all_groups\n"
         for slot in ("_a", "_b"):
             content += (
-                f"add_group qti_dynamic_partitions{slot} "
+                f"add_group {group_name}{slot} "
                 f"{V.SETUP_MANIFEST['SUPER_SIZE']}\n"
             )
         for partition in ("system", "system_ext", "product", "vendor", "odm"):
             for slot in ("_a", "_b"):
-                content += f"add {partition}{slot} qti_dynamic_partitions{slot}\n"
-        for partition in ("system_a", "system_ext_a", "product_a", "vendor_a", "odm_a"):
-            content += f"resize {partition} 2\n"
+                content += f"add {partition}{slot} {group_name}{slot}\n"
+        # Deliberately no `resize` placeholders: only the partition built by
+        # this job has a known size, and the old `resize <part> 2` lines would
+        # shrink every other logical partition to two bytes when the list is used.
         with open(new_op_list, "w", encoding="UTF-8", newline="\n") as target:
             target.write(content)
 
-    renew_size = os.path.getsize(distance)
+    # Prefer the caller's real image size.  `img2simg` output is a sparse file
+    # whose byte count is unrelated to the partition it stands for, so measuring
+    # `distance` would resize the partition far below the image that gets flashed.
+    renew_size = int(image_size) if image_size else os.path.getsize(distance)
     with open(new_op_list, "r", encoding="UTF-8") as source:
         lines = source.readlines()
+    resized = False
     with open(new_op_list, "w", encoding="UTF-8") as target:
         for line in lines:
             if f"resize {label} " in line:
                 line = f"resize {label} {renew_size}\n"
+                resized = True
             elif f"resize {label}_a " in line:
                 line = f"resize {label}_a {renew_size}\n"
+                resized = True
             target.write(line)
+        if not resized:
+            suffix = label if label.endswith(("_a", "_b")) else label + "_a"
+            target.write(f"resize {suffix} {renew_size}\n")
 
     return True
 
@@ -221,5 +273,7 @@ def recompress_ext4(source, fsconfig, contexts, dumpinfo, flag=8):
     )
     display(f"重新合成: {state['label']}.img ...", 4)
     if _write_image(state, fsconfig, contexts, source, flag):
-        if _update_dynamic_partitions(state["label"], state["distance"]) and flag > 9:
+        if _update_dynamic_partitions(
+            state["label"], state["distance"], state.get("raw_size")
+        ) and flag > 9:
             recompress_dat_br(state["label"], state["distance"], flag)

@@ -34,8 +34,11 @@ class RangeSet(object):
     def __ne__(self, other):
         return self.data != other.data
 
-    def __nonzero__(self):
+    def __bool__(self):
         return bool(self.data)
+
+    # Python 2 spelling: keep it as an alias so explicit lookups still work.
+    __nonzero__ = __bool__
 
     def __str__(self):
         if not self.data:

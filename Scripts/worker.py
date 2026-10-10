@@ -5,6 +5,7 @@ import contextlib
 import json
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import traceback
@@ -12,7 +13,8 @@ import hashlib
 from pathlib import Path
 
 from Scripts.application import ArtController, ROOT
-from Scripts.Primary.WorkSpace import ProjectLayout, partition_name
+from Scripts.Primary.Utils import remove_tree
+from Scripts.Primary.WorkSpace import LayoutError, ProjectLayout, partition_name
 
 def _emit(event, **payload):
     sys.__stdout__.write(json.dumps({"event": event, **payload}, ensure_ascii=False) + "\n")
@@ -56,11 +58,16 @@ def _bind(layout, sparse=False, root=None):
     settings = root / "art-res" / "settings.json"
     V.SETUP_MANIFEST = dict(_SETUP_DEFAULTS)
     if settings.is_file():
-        V.SETUP_MANIFEST.update(json.loads(settings.read_text(encoding="utf-8")))
+        # A truncated settings file (killed write, full disk) must not kill
+        # every job: fall back to the defaults and say so.
+        try:
+            V.SETUP_MANIFEST.update(json.loads(settings.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as error:
+            print(f"设置文件无法解析，已使用默认设置：{settings} ({error})", flush=True)
     V.SETUP_MANIFEST["REPACK_SPARSE_IMG"] = "1" if sparse else "0"
     V.toolchain = detect_toolchain(root)
 
-def _publish(pairs, *, replace=False):
+def _publish(pairs, *, replace=False, workspace=None):
     # Preflight all names before moving any staged artifact.
     for source, destination in pairs:
         if not source.exists():
@@ -73,14 +80,23 @@ def _publish(pairs, *, replace=False):
         # Extraction is intentionally repeatable.  Move old artifacts aside
         # first, then publish the complete staged result.  A failed publish
         # restores every old path so a working workspace is never lost.
-        workspace = next((destination.parent for _, destination in pairs
-                          if destination.name == "config" or destination.parent.name == "config"), None)
         if workspace is None:
-            workspace = pairs[0][1].parent
-        # Keep the transaction directory outside config/WORKSPACE.  Putting
-        # it inside config makes a failed publish look like one of the files
-        # being committed and can make rollback fail with FileNotFoundError.
-        backup_dir = Path(tempfile.mkdtemp(prefix=".art-backup-", dir=workspace.parent))
+            # Legacy callers: stay inside the project (OUT or WORKSPACE) and
+            # never use the project root, which must contain only INPUT, OUT,
+            # WORKSPACE and OTA_WORK.
+            workspace = next((destination.parent for _, destination in pairs
+                              if destination.parent.name == "config"), None)
+            if workspace is None:
+                workspace = pairs[0][1].parent
+            if Path(workspace).name == "config":
+                workspace = Path(workspace).parent
+        workspace = Path(workspace)
+        if not workspace.is_dir():
+            workspace = workspace.parent
+        # Keep the transaction directory inside the project WORKSPACE.  A
+        # leftover in the project root made ProjectLayout.state() report
+        # "unsupported", permanently blocking every later job on that project.
+        backup_dir = Path(tempfile.mkdtemp(prefix=".art-backup-", dir=workspace))
         for index, (_source, destination) in enumerate(pairs):
             if destination.exists() or destination.is_symlink():
                 backup = backup_dir / str(index)
@@ -100,10 +116,10 @@ def _publish(pairs, *, replace=False):
             if backup.exists() or backup.is_symlink():
                 os.replace(backup, destination)
         if backup_dir:
-            shutil.rmtree(backup_dir, ignore_errors=True)
+            remove_tree(backup_dir, ignore_errors=True)
         raise
     if backup_dir:
-        shutil.rmtree(backup_dir, ignore_errors=True)
+        remove_tree(backup_dir, ignore_errors=True)
     return [str(destination) for _, destination in pairs]
 
 
@@ -141,11 +157,63 @@ def _source_image(layout, partition):
                 return candidate
     return None
 
+
+def _logical_image_size(path):
+    """Byte size of an image, reading the sparse header when there is one.
+
+    ``stat().st_size`` of an Android sparse image is the length of the
+    container, not the logical partition size.  Sizing a rebuild from it makes
+    mke2fs/e2fsdroid fail, or publishes a partition far smaller than the
+    original the user asked to preserve.
+    """
+    from Scripts.Primary.ImageTools import is_sparse_image
+    path = Path(path)
+    try:
+        if is_sparse_image(str(path)):
+            with path.open("rb") as stream:
+                header = stream.read(28)
+            if len(header) == 28:
+                block_size, total_blocks = struct.unpack("<II", header[12:20])
+                if block_size and total_blocks:
+                    return block_size * total_blocks
+    except (OSError, ValueError, struct.error):
+        pass
+    return path.stat().st_size
+
+
+def _sweep_stale_transactions(root):
+    """Remove abandoned job/publish directories left behind by killed jobs.
+
+    The worker stages each job in a TemporaryDirectory and publishes through a
+    transaction directory; both are only cleaned up on a graceful exit, so a
+    cancelled job used to leave a full copy of the ROM behind forever.  Only
+    clearly abandoned entries are removed, so a concurrently running job is
+    never disturbed.
+    """
+    import time
+    cutoff = time.time() - 24 * 3600
+    try:
+        entries = list(Path(root).iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        name = entry.name
+        if not name.startswith((".art-job-", ".art-backup-")):
+            continue
+        try:
+            if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                remove_tree(entry, ignore_errors=True)
+        except OSError:
+            continue
+
 def execute(request):
     controller = ArtController(request["root"])
     params = request["params"]
     layout = controller._layout(params["project"])
     operation = request["operation"]
+    # Reclaim what killed/cancelled jobs left behind before staging this one.
+    _sweep_stale_transactions(layout.workspace_dir)
+    _sweep_stale_transactions(layout.project_dir)
     with tempfile.TemporaryDirectory(prefix=".art-job-", dir=layout.workspace_dir) as temporary:
         stage = ProjectLayout(Path(temporary) / "stage").initialize()
         _bind(stage, params.get("sparse", False), controller.root)
@@ -241,7 +309,7 @@ def _extract(controller, layout, stage, params):
     pairs += [(p, layout.config_dir / p.name) for p in stage.config_dir.iterdir()]
     if not pairs:
         raise RuntimeError("任务没有生成产物")
-    outputs = _publish(pairs, replace=True)
+    outputs = _publish(pairs, replace=True, workspace=layout.workspace_dir)
     _emit("progress", current=len(sources), total=len(sources), message="提取完成")
     return {"project": str(layout.project_dir), "workspace": str(layout.workspace_dir), "outputs": outputs}
 
@@ -275,10 +343,19 @@ def _convert(controller, layout, stage, params):
     if target not in {"raw", "sparse"}:
         raise ValueError("转换目标必须是 raw 或 sparse")
     suffix = ".raw.img" if target == "raw" else ".sparse.img"
-    destination = stage.out_dir / (source.stem + suffix)
+    # ``Path.stem`` strips only the last suffix, so ``system_a.sparse.img``
+    # became ``system_a.sparse.raw.img`` and every later consumer resolved the
+    # partition as ``system_a.sparse``.  Use the canonical parser, which also
+    # keeps repeated conversions from compounding suffixes.
+    try:
+        stem = partition_name(source)
+    except LayoutError:
+        stem = source.stem
+    destination = stage.out_dir / (stem + suffix)
     function = sparse_to_raw if target == "raw" else raw_to_sparse
     function(str(source), str(destination), temp_dir=str(stage.workspace_dir))
-    return {"outputs": _publish([(destination, layout.out_dir / destination.name)], replace=True),
+    return {"outputs": _publish([(destination, layout.out_dir / destination.name)], replace=True,
+                                workspace=layout.workspace_dir),
             "format": get_file_type(destination) if destination.exists() else target}
 
 def _repack(controller, layout, stage, params):
@@ -313,7 +390,7 @@ def _repack(controller, layout, stage, params):
     if V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] == "original":
         original_source = _source_image(layout, partition)
         if original_source:
-            V.SETUP_MANIFEST["REPACK_IMAGE_SIZE_BYTES"] = str(original_source.stat().st_size)
+            V.SETUP_MANIFEST["REPACK_IMAGE_SIZE_BYTES"] = str(_logical_image_size(original_source))
             V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] = "auto"
         else:
             V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] = "auto"
@@ -349,7 +426,8 @@ def _repack(controller, layout, stage, params):
         if params.get("_defer_publish"):
             return {"staged_artifacts": [str(passthrough)],
                     "format": "img", "validation": "原镜像直通，保留 vendor/odm 原始几何结构；e2fsck -fn 通过"}
-        return {"outputs": _publish([(passthrough, layout.out_dir / passthrough.name)], replace=True),
+        return {"outputs": _publish([(passthrough, layout.out_dir / passthrough.name)], replace=True,
+                                    workspace=layout.workspace_dir),
                 "format": "img", "validation": "原镜像直通，保留 vendor/odm 原始几何结构；e2fsck -fn 通过"}
     if fixed_geometry:
         raise ValueError("vendor/odm 工作区已修改，不能使用普通 EXT4 重建；请使用原位替换流程，或恢复为未修改状态")
@@ -398,7 +476,7 @@ def _repack(controller, layout, stage, params):
         return {"staged_artifacts": [str(path) for path in artifacts], "format": target,
                 "validation": validation}
     pairs = [(path, layout.out_dir / path.name) for path in artifacts]
-    return {"outputs": _publish(pairs, replace=True), "format": target,
+    return {"outputs": _publish(pairs, replace=True, workspace=layout.workspace_dir), "format": target,
             "validation": validation}
 
 
@@ -424,7 +502,8 @@ def _repack_batch(controller, layout, stage, params):
             validations.append(f"{partition}: {result['validation']}")
     _emit("progress", current=len(partitions), total=len(partitions), message="批量回包完成")
     artifacts = sorted(path for path in collected.iterdir() if path.is_file())
-    outputs = _publish([(path, layout.out_dir / path.name) for path in artifacts], replace=True)
+    outputs = _publish([(path, layout.out_dir / path.name) for path in artifacts], replace=True,
+                       workspace=layout.workspace_dir)
     return {"outputs": outputs, "format": params.get("target", "img"),
             "validation": "；".join(validations)}
 
@@ -456,7 +535,8 @@ def _repack_super(controller, layout, stage, params):
     artifacts = [p for p in stage.out_dir.iterdir() if p.is_file()]
     if not artifacts:
         raise RuntimeError("super 回包失败，未生成产物")
-    return {"outputs": _publish([(path, layout.out_dir / path.name) for path in artifacts], replace=True),
+    return {"outputs": _publish([(path, layout.out_dir / path.name) for path in artifacts], replace=True,
+                                workspace=layout.workspace_dir),
             "format": "super", "super_type": super_type}
 
 def main():

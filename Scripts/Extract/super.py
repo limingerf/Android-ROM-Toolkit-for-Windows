@@ -5,7 +5,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from Scripts.Primary.Utils import V
+from Scripts.Primary.Utils import V, remove_tree
 from Scripts.Primary.Console import display
 from Scripts.Primary.WorkSpace import workspace_partition
 from Scripts.Primary.SuperTools import LpUnpack, LpUnpackError, _SparseRawCache, unpack
@@ -126,12 +126,19 @@ def extract_super(working_source, partition):
     if not getattr(V, 'JM', False) and sys.stdin.isatty() and input('> 是否继续分解img [0/1]: ') != '1':
         _cleanup_super_ab(super_dir)
         _move_super_images_to_out(super_dir)
-        shutil.rmtree(super_dir, ignore_errors=True)
+        remove_tree(super_dir, ignore_errors=True)
         return True
 
+    failed = []
     for image, image_partition in _super_images_to_process(super_dir):
-        decompress_img(image, workspace_partition(image_partition))
-    shutil.rmtree(super_dir, ignore_errors=True)
+        if not decompress_img(image, workspace_partition(image_partition)):
+            failed.append(os.path.basename(image))
+    if failed:
+        # Keep the extracted images: they are the only copy of the partitions
+        # that could not be dispatched, so the user can retry them.
+        print(f'{RED}> 以下镜像未能继续解包，已保留在 {super_dir}: {", ".join(failed)}{CLOSE}')
+        return False
+    remove_tree(super_dir, ignore_errors=True)
     return True
 
 
@@ -190,20 +197,24 @@ def _list_partitions(super_img_path):
     """Parse super metadata and return (sorted_partition_info, effective_img_path)."""
     job = LpUnpack(SUPER_IMAGE=super_img_path, SHOW_INFO=False, TEMP_DIR=V.workspace)
     effective_path = super_img_path
-    job._fd.seek(0)
-    metadata = job._read_metadata()
     result = []
-    for p in metadata.partitions:
-        size = 0
-        for ext_idx in range(p.num_extents):
-            idx = p.first_extent_index + ext_idx
-            if idx < len(metadata.extents):
-                size += metadata.extents[idx].num_sectors * 512
-        group = ""
-        if 0 <= p.group_index < len(metadata.groups):
-            group = metadata.groups[p.group_index].name
-        result.append((p.name, group, size))
-    job.close()
+    try:
+        job._fd.seek(0)
+        metadata = job._read_metadata()
+        for p in metadata.partitions:
+            size = 0
+            for ext_idx in range(p.num_extents):
+                idx = p.first_extent_index + ext_idx
+                if idx < len(metadata.extents):
+                    size += metadata.extents[idx].num_sectors * 512
+            group = ""
+            if 0 <= p.group_index < len(metadata.groups):
+                group = metadata.groups[p.group_index].name
+            result.append((p.name, group, size))
+    finally:
+        # Always release the handle: on Windows an open handle keeps the
+        # multi-GB super.img locked after a metadata error.
+        job.close()
     result.sort(key=lambda x: (-x[2], x[0]))  # Sort by size descending, then by name.
     return result, effective_path
 
@@ -311,20 +322,28 @@ def super_selective_main():
     from Scripts.Primary.Utils import clear_console
     clear_console()
     print(f'\n{BOLD}> 正在读取 super 元数据...{CLOSE}')
-    partitions, effective_path = _list_partitions(super_path)
-
-    if not partitions:
-        print(f'{RED}> super.img 内未发现分区或解析失败{CLOSE}')
-        input('> 任意键继续')
+    try:
+        partitions, effective_path = _list_partitions(super_path)
+    except (LpUnpackError, OSError, ValueError) as error:
+        # An unreadable super.img must not end the session; release the
+        # sparse→raw temp copy as well.
+        _SparseRawCache.cleanup_all()
+        print(f'{RED}> super 元数据解析失败: {error}{CLOSE}')
         return
 
-    selected = _show_partitions(partitions)
+    try:
+        if not partitions:
+            print(f'{RED}> super.img 内未发现分区或解析失败{CLOSE}')
+            input('> 任意键继续')
+            return
 
-    if selected:
-        _extract_selected(effective_path, out_dir, partitions, selected)
+        selected = _show_partitions(partitions)
 
-    # Clean up any shared sparse→raw temp files created during this session.
-    _SparseRawCache.cleanup_all()
+        if selected:
+            _extract_selected(effective_path, out_dir, partitions, selected)
+    finally:
+        # Clean up any shared sparse→raw temp files created during this session.
+        _SparseRawCache.cleanup_all()
 
 
 

@@ -9,7 +9,7 @@ import sys
 import tarfile
 from pathlib import Path
 
-from Scripts.Primary.Utils import V
+from Scripts.Primary.Utils import V, remove_tree
 from Scripts.Primary.ImageTools import get_file_type
 
 
@@ -48,7 +48,7 @@ def _workspace_partition(partition: str) -> Path:
 def _create_partition_stage(partition: str) -> Path:
     partition_dir = _workspace_partition(partition)
     if partition_dir.exists():
-        shutil.rmtree(partition_dir)
+        remove_tree(partition_dir)
     partition_dir.mkdir(parents=True, exist_ok=True)
     return partition_dir
 
@@ -77,6 +77,23 @@ def _win_partition(source: str) -> str:
     return _validate_component(os.path.basename(source).split('.', 1)[0])
 
 
+def _missing_fragments(fragments) -> list:
+    """Return the numbers absent from a ``<part>.win.NNN`` fragment series.
+
+    Fragments are concatenated in name order, so a gap silently produced a
+    truncated image that was then published as if it were complete.
+    """
+    numbers = []
+    for fragment in fragments:
+        match = re.fullmatch(r'.*\.win\.(\d+)', os.path.basename(fragment))
+        if match:
+            numbers.append(int(match.group(1)))
+    if not numbers:
+        return []
+    expected = set(range(1, max(numbers) + 1))
+    return [f'{number:03d}' for number in sorted(expected - set(numbers))]
+
+
 # Merge WIN fragments and dispatch image or TAR content.
 def decompress_win(infile_list):
     """Extract image-form or TAR-form WIN archives into WORKSPACE."""
@@ -96,6 +113,10 @@ def decompress_win(infile_list):
     for partition, fragments in groups.items():
         staged_win = Path(workspace_value) / f'{partition}.win'
         fragments.sort(key=lambda item: (not item.endswith('.win'), os.path.basename(item)))
+        missing = _missing_fragments(fragments)
+        if missing:
+            print(f'> {partition}: 缺少分片 {", ".join(missing)}，已跳过（合并只会得到损坏的镜像）')
+            continue
         try:
             with open(staged_win, 'wb') as destination_file:
                 for fragment in fragments:

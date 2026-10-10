@@ -28,6 +28,7 @@ from PySide6.QtCore import QUrl, QRectF
 
 from Scripts.application import ArtController, ROOT
 from Scripts.Platform.runtime import CAPABILITIES, process_options
+from Scripts.version import APP_VERSION
 
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 FORMAT_NAMES = {"ext": "EXT4", "erofs": "EROFS", "sparse": "Sparse", "boot": "Boot",
@@ -214,7 +215,7 @@ class ArtWindow(QMainWindow):
         self._log_lines = 0
         self._action_buttons = []
         self.ui_theme = self._load_theme()
-        self.setWindowTitle("Android ROM Toolkit for Windows")
+        self.setWindowTitle(f"Android ROM Toolkit for Windows  v{APP_VERSION}")
         self.setMinimumSize(900, 620)
         self.resize(1180, 760)
         self._set_icon()
@@ -1139,10 +1140,11 @@ class ArtWindow(QMainWindow):
         return {"filesystem": mode, "image_size": image_size, "erofs_compressor": comp.currentText(), "erofs_level": level.value(), "sparse": sparse.isChecked()}
 
     def _repack_super(self):
-        project = self._require_project(); rows = self.super_table.selectionModel().selectedRows(); sources = []
+        project = self._require_project()
+        if not project: return
+        rows = self.super_table.selectionModel().selectedRows(); sources = []
         for i in rows:
             name = self.super_table.item(i.row(), 0).text(); source = self.super_table.item(i.row(), 1).text(); sources.append(str(self.controller.root / project / source / name))
-        if not project: return
         if not sources:
             QMessageBox.information(self, "选择镜像", "请先选择要合成 super.img 的镜像。")
             return

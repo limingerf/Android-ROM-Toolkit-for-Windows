@@ -582,9 +582,11 @@ def _decompress_payload_images(payload, payload_dir, mode):
         except (AttributeError, LayoutError):
             destination = os.path.join(payload_dir, partition_name(image))
             os.makedirs(destination, exist_ok=True)
-        decompress_img(image, destination)
-    for image in images:
-        if os.path.isfile(image):
+        # Only drop an image whose contents were actually extracted.  Deleting
+        # every globbed image destroyed the user's only copy of a partition
+        # that A.R.T cannot unpack (e.g. f2fs), and removed images from
+        # unrelated earlier runs.
+        if decompress_img(image, destination):
             os.remove(image)
 
 

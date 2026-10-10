@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from pathlib import Path
 
-from Scripts.Primary.Utils import V, call
+from Scripts.Primary.Utils import V, call, remove_tree
 from Scripts.Primary.Console import display
 
 
@@ -85,6 +86,13 @@ def extract_erofs(working_source, partition, destination):
         _metadata_path(config_dir, partition, '_size.txt').write_text(
             str(source.stat().st_size), encoding='utf-8'
         )
+        # Re-extraction must start from a clean tree: the extractor defaults to
+        # skipping files that already exist, so a stale tree from an earlier or
+        # interrupted run would silently mix two images.  The ext4 and boot
+        # paths already clear their destination the same way.
+        if destination != workspace and destination.parent == workspace \
+                and destination.exists() and not destination.is_symlink():
+            remove_tree(destination, ignore_errors=True)
         if call(['extract.erofs', '-i', str(source), '-o', str(workspace), '-x']) != 0:
             print('> EROFS 分解失败')
             return False

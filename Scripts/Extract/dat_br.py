@@ -178,12 +178,18 @@ def _combine_fragments(source):
         return str(source)
     dest = Path(V.workspace) / source_path.name
     sources = [source_path, *fragments]
-    with open(dest, 'xb') as destination_file:
-        for index, fragment in enumerate(sources):
-            if index:
-                display(f'合并: {fragment.name} ...')
-            with open(fragment, 'rb') as source_file:
-                shutil.copyfileobj(source_file, destination_file, length=1024 * 1024)
+    try:
+        with open(dest, 'xb') as destination_file:
+            for index, fragment in enumerate(sources):
+                if index:
+                    display(f'合并: {fragment.name} ...')
+                with open(fragment, 'rb') as source_file:
+                    shutil.copyfileobj(source_file, destination_file, length=1024 * 1024)
+    except OSError:
+        # A half-written merge would make every later retry fail with
+        # "File exists" and this partition could never be extracted again.
+        dest.unlink(missing_ok=True)
+        raise
     return str(dest)
 
 
@@ -195,7 +201,7 @@ def decompress_dat(transfer, source, distance=None, keep=0):
     del distance, keep
     if not transfer or not os.path.isfile(transfer):
         print(f'> 未找到 {os.path.basename(source).split(".")[0]}.transfer.list')
-        return
+        return False
 
     combined = None
     raw_image = None
@@ -210,9 +216,11 @@ def decompress_dat(transfer, source, distance=None, keep=0):
         if not os.path.isfile(raw_image):
             raise SdatError('未生成 raw image')
         print("\x1b[1;32m [%ds]\x1b[0m" % (_time.time() - s_time))
-        decompress_img(raw_image, workspace_partition(partition))
+        if not decompress_img(raw_image, workspace_partition(partition)):
+            raise SdatError('镜像未成功分解')
     except (LayoutError, OSError, ValueError, SdatError) as error:
         print(f'> DAT 分解失败: {error}')
+        return False
     finally:
         for f in (combined, raw_image):
             if f and f != source and os.path.isfile(f):
@@ -220,6 +228,7 @@ def decompress_dat(transfer, source, distance=None, keep=0):
                     os.remove(f)
                 except OSError:
                     pass
+    return True
 
 
 # Decode Brotli-compressed DAT fragments.
@@ -228,7 +237,7 @@ def decompress_bro(transfer, source, distance=None, keep=0):
     del distance, keep
     if not transfer or not os.path.isfile(transfer):
         print(f'> 未找到 {os.path.basename(source).split(".")[0]}.transfer.list')
-        return
+        return False
 
     combined = None
     staged_dat = None
@@ -245,9 +254,10 @@ def decompress_bro(transfer, source, distance=None, keep=0):
         if not os.path.isfile(staged_dat):
             raise LayoutError('brotli 未生成 new.dat')
         print("\x1b[1;32m [%ds]\x1b[0m" % (_time.time() - s_time))
-        decompress_dat(transfer, staged_dat)
+        return decompress_dat(transfer, staged_dat)
     except (LayoutError, OSError) as error:
         print(f'> BROTLI 分解失败: {error}')
+        return False
     finally:
         for f in (combined, staged_dat):
             if f and f != source and os.path.isfile(f):
@@ -267,7 +277,13 @@ def _list_dat_partitions(infile):
         if not os.path.isfile(transfer):
             print(f'> 跳过 {os.path.basename(part)}：未找到 transfer.list')
             continue
-        name = partition_name(part)
+        try:
+            name = partition_name(part)
+        except LayoutError as error:
+            # Names such as "system (1).new.dat" (browser re-download) or a
+            # non-ASCII name must skip that one file, not abort the batch.
+            print(f'> 跳过 {os.path.basename(part)}：{error}')
+            continue
         size = os.path.getsize(part)
         items.append({"path": part, "transfer": transfer, "partition": name, "size": size})
     return items
@@ -278,9 +294,15 @@ def _decompress_single_partition(item, flag):
     name = item["partition"]
     try:
         if flag == 2:
-            decompress_bro(item["transfer"], item["path"])
+            outcome = decompress_bro(item["transfer"], item["path"])
         elif flag == 3:
-            decompress_dat(item["transfer"], item["path"])
+            outcome = decompress_dat(item["transfer"], item["path"])
+        else:
+            outcome = False
+        if not outcome:
+            # The extractors report their own errors and return False; without
+            # this check a failed partition was still printed as a success.
+            return {"partition": name, "success": False, "error": "未生成分区"}
         return {"partition": name, "success": True, "error": None}
     except (LayoutError, OSError, ValueError, SdatError) as error:
         return {"partition": name, "success": False, "error": str(error)}
@@ -328,7 +350,16 @@ def decompress_dat_batch(infile, flag):
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_decompress_single_partition, it, flag): it for it in selected}
         for future in as_completed(futures):
-            result = future.result()
+            item = futures[future]
+            try:
+                result = future.result()
+            except Exception as error:
+                # A worker can raise outside the tuple it handles (a malformed
+                # transfer.list, a decoder error).  That used to escape here and
+                # abort the whole batch before the summary, discarding the
+                # results of every other partition.
+                result = {"partition": item["partition"], "success": False,
+                          "error": f"{type(error).__name__}: {error}"}
             if result["success"]:
                 print(f'  {GREEN}✓{CLOSE} {result["partition"]}')
                 ok += 1

@@ -11,8 +11,57 @@ import tempfile
 from pathlib import Path
 
 from Scripts.Platform.runtime import bootstrap_windows_tools, detect_toolchain, process_options
-from Scripts.Primary.WorkSpace import ProjectLayout
+from Scripts.Primary.WorkSpace import ProjectLayout, classify_ota_parts
 from Scripts.Primary.Settings import _SETUP_DEFAULTS
+from Scripts.Primary.Utils import remove_tree
+
+
+def _ota_image_args(images, existing, partition_sizes):
+    """Build the ``--replace``/``--add-partition`` arguments for staged images.
+
+    ``Path.stem`` kept the ``.sparse`` suffix and the ``_a`` slot, so a staged
+    ``system.sparse.img`` was offered to avbroot as a brand new partition
+    instead of a replacement.  Returns (args, added_names, staged_names).
+    """
+    replace_parts, new_parts = classify_ota_parts(
+        [image.name for image in images], existing)
+    by_name = {image.name: image for image in images}
+    args = []
+    for part, image_name in replace_parts:
+        args.extend(["--replace", part, str(by_name[image_name])])
+    added = []
+    for part, image_name, _ in new_parts:
+        args.extend(["--add-partition", part, str(by_name[image_name])])
+        # Accept the size keyed by either the OTA name or the file stem.
+        size = partition_sizes.get(part)
+        if size is None:
+            size = partition_sizes.get(Path(image_name).stem)
+        if size is not None:
+            args.append(str(size))
+        added.append(part)
+    staged_names = {image.stem for image in images} | {name for name, _, _ in new_parts}
+    return args, added, staged_names
+
+
+def _write_json_atomic(path: Path, payload: str) -> None:
+    """Write JSON so an interrupted write cannot leave a truncated file.
+
+    The previous plain ``write_text`` truncated first, so a kill, a full disk or
+    a second instance left unparsable JSON that then broke every later job.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp",
+                                         dir=str(path.parent))
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+        os.replace(temporary, path)
+    except OSError:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 ROOT = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
 
@@ -35,8 +84,10 @@ class ArtController:
         if directory and not Path(directory).is_dir():
             raise ValueError("工具目录不存在")
         config = self.root / "art-res" / "host-tools.local.json"
-        config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(json.dumps({"backend": backend, "windows_tools": directory}, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_json_atomic(
+            config,
+            json.dumps({"backend": backend, "windows_tools": directory}, ensure_ascii=False, indent=2),
+        )
         # An explicit GUI/MCP choice also overrides an inherited environment
         # variable for this process and its workers.
         os.environ["ART_BACKEND"] = backend
@@ -66,7 +117,7 @@ class ArtController:
             raise ValueError("工程名称或路径无效")
         if project_dir.is_symlink() or not project_dir.is_dir():
             raise ValueError("工程目录不存在或不是目录")
-        shutil.rmtree(project_dir)
+        remove_tree(project_dir)
         return {"name": project_dir.name, "deleted": True}
 
     def get_settings(self) -> dict:
@@ -106,8 +157,7 @@ class ArtController:
         except (TypeError, ValueError):
             raise ValueError("BROTLI 等级应为 0-9，DAT 分段数应为 1-999")
         path = self.root / "art-res" / "settings.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(values, ensure_ascii=False, indent=4), encoding="utf-8")
+        _write_json_atomic(path, json.dumps(values, ensure_ascii=False, indent=4))
         return values
 
     def payload_partitions(self, project: str, source: str) -> list[dict]:
@@ -322,7 +372,7 @@ class ArtController:
                 if destination.is_symlink() or not destination.is_dir():
                     destination.unlink()
                 else:
-                    shutil.rmtree(destination)
+                    remove_tree(destination)
             shutil.copytree(staged, destination)
         return {"name": name, "path": str(destination), "installed": True}
 
@@ -333,7 +383,7 @@ class ArtController:
         destination = self.root / "local" / "sub" / name
         if not destination.is_dir() or destination.is_symlink():
             raise FileNotFoundError(f"插件不存在：{name}")
-        shutil.rmtree(destination)
+        remove_tree(destination)
         return {"name": name, "removed": True}
 
     # ---- AVB / OTA non-interactive helpers -----------------------------
@@ -559,7 +609,7 @@ class ArtController:
         if not listing["ok"]:
             raise RuntimeError(listing["output"] or "无法读取源 OTA 分区列表")
         existing = {line.strip() for line in listing["output"].splitlines() if line.strip()}
-        added = [image.stem for image in images if image.stem not in existing]
+        image_args, added, staged_names = _ota_image_args(images, existing, partition_sizes)
         if added and "--add-partition" not in help_text:
             raise ValueError("当前 Windows 原生 avbroot 不支持添加 OTA 分区：" + "、".join(added) + "；请仅导入源 OTA 已有分区，或配置支持 --add-partition 的扩展版")
         output = layout.ota_work_dir / (zip_path.stem + "_signed.zip")
@@ -569,13 +619,9 @@ class ArtController:
         if not disable_avb and avb_key.is_file():
             args.extend(["--key-avb", avb_key])
             if pass_file.is_file(): args.extend(["--pass-avb-file", pass_file])
-        for image in images:
-            part = image.stem
-            args.extend(["--replace" if part in existing else "--add-partition", part, image])
-            if part not in existing and part in partition_sizes:
-                args.append(str(partition_sizes[part]))
+        args.extend(image_args)
         for part in super_partitions:
-            if part not in {image.stem for image in images}:
+            if part not in staged_names:
                 raise ValueError(f"super 分区 {part} 没有对应的 input-img 镜像")
             if part in existing:
                 raise ValueError(f"super 分区 {part} 已存在于 OTA，不能作为新增动态分区标记")
