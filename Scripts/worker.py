@@ -13,7 +13,7 @@ import hashlib
 from pathlib import Path
 
 from Scripts.application import ArtController, ROOT
-from Scripts.Primary.Utils import remove_tree
+from Scripts.Primary.Utils import copy_tree, raise_on_case_collisions, remove_tree
 from Scripts.Primary.WorkSpace import LayoutError, ProjectLayout, partition_name
 
 def _emit(event, **payload):
@@ -297,6 +297,11 @@ def _extract(controller, layout, stage, params):
             shutil.copyfile(source, copied)
             if not decompress_img(str(copied), str(stage.workspace_dir / name)):
                 raise RuntimeError(f"{source.name} 解包失败，原工作区保持不变")
+            # A partition may hold two names that differ only in case.  Windows
+            # cannot store both, so the extraction silently merged them and the
+            # workspace no longer matches the image; stop before the user edits
+            # a tree that can never be repacked faithfully.
+            raise_on_case_collisions(stage.workspace_dir / name)
             # Keep an immutable baseline so a later repack can distinguish a
             # clean extraction from a workspace that the user edited.
             source_hash = _file_sha256(source)
@@ -470,7 +475,11 @@ def _repack(controller, layout, stage, params):
     if original_format == "ext":
         for tool in ("mke2fs", "e2fsdroid", "e2fsck"):
             V.toolchain.resolve(tool)
-    shutil.copytree(source, stage.workspace_dir / partition, symlinks=True)
+    # Refuse before copying: shutil.copytree aborts with a bare WinError 183 on
+    # a case collision, which names neither the directory nor the cause, and a
+    # tolerant copy would silently merge the two trees.
+    raise_on_case_collisions(source)
+    copy_tree(source, stage.workspace_dir / partition)
     for meta in layout.config_dir.glob(partition + "_*"):
         shutil.copy2(meta, stage.config_dir / meta.name)
     copied = str(stage.workspace_dir / partition)

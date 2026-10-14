@@ -292,3 +292,170 @@ def findfile(file, dir_) -> str:
     for root, dirs, files in os.walk(dir_, topdown=True):
         if file in files:
             return root + os.sep + file
+
+
+# ---------------------------------------------------------------------------
+# Case-insensitive filesystem collisions
+# ---------------------------------------------------------------------------
+# Android filesystems are case sensitive, so one directory can hold both
+# "ES-Vodafone" and "es-vodafone".  NTFS is case insensitive for every Win32
+# caller: the second name resolves to the first, so creating it fails with
+# WinError 183 and copying it would silently merge two different trees into
+# one.  Detect the collision instead of losing content or crashing with a
+# message that names neither the directory nor the cause.
+CASE_COLLISION_REMEDY = (
+    "请开启 Windows 开发者模式（或以管理员身份运行），在解包前对工作区启用目录大小写敏感"
+    "（fsutil file setCaseSensitiveInfo <工作区> enable）后重新解包，"
+    "或改用 WSL 后端；直接继续会丢失其中一个目录的内容。"
+)
+
+
+def _colliding_names(names):
+    """Return the name groups in *names* that differ only in case."""
+    seen = {}
+    for name in names:
+        seen.setdefault(name.lower(), []).append(name)
+    return [sorted(group) for group in seen.values() if len(group) > 1]
+
+
+def find_case_collisions(root, limit=None):
+    """Return names under *root* that differ only in case.
+
+    Each item is ``(directory, kind, names)`` where ``kind`` is ``'dir'`` or
+    ``'file'`` and ``names`` lists every colliding spelling.  Directory
+    symlinks are not followed, so a linked tree is never scanned twice.
+
+    A collision is only visible when the filesystem kept both spellings.  NTFS
+    does keep them for directories created through its POSIX namespace, which
+    is how an extraction produced the colliding workspace in the first place.
+    """
+    collisions = []
+    visited = set()
+    for current, dirs, files in os.walk(root, followlinks=False):
+        try:
+            identity = os.path.realpath(current)
+        except OSError:
+            identity = current
+        if identity in visited:
+            dirs[:] = []
+            continue
+        visited.add(identity)
+        for names, kind in ((dirs, 'dir'), (files, 'file')):
+            for group in _colliding_names(names):
+                collisions.append((current, kind, group))
+                if limit is not None and len(collisions) >= limit:
+                    return collisions
+    return collisions
+
+
+def describe_case_collisions(collisions, root=None, limit=5):
+    """Format collisions for a user-facing error message."""
+    lines = []
+    for directory, kind, names in collisions[:limit]:
+        location = directory
+        if root is not None:
+            try:
+                relative = os.path.relpath(directory, root)
+            except ValueError:
+                relative = directory
+            if relative != os.curdir:
+                location = f"{root}{os.sep}{relative}"
+        lines.append(f"{location} ({kind}: {' / '.join(names)})")
+    if len(collisions) > limit:
+        lines.append(f"另有 {len(collisions) - limit} 处")
+    return "；".join(lines)
+
+
+def copy_tree(source, destination):
+    """Copy a directory tree, preserving symbolic links.
+
+    ``shutil.copytree`` cannot be used here: it calls ``os.makedirs`` without
+    ``exist_ok`` for every directory it meets, so on Windows a partition that
+    contains two names differing only in case aborts the whole copy with
+    ``WinError 183``.  This walk creates directories idempotently, recreates
+    symbolic links (including directory links) and keeps file metadata.
+
+    Directory junctions are skipped: they are a Windows-only mount point that
+    ``os.walk`` follows even with ``followlinks=False``, so descending into one
+    could copy a tree twice or never finish.
+    """
+    source = os.fspath(source)
+    destination = os.fspath(destination)
+    os.makedirs(extended_path(destination), exist_ok=True)
+    failures = []
+    for root, dirs, files in os.walk(source, followlinks=False):
+        relative = os.path.relpath(root, source)
+        target_root = destination if relative == os.curdir else os.path.join(destination, relative)
+        for name in list(dirs):
+            entry = os.path.join(root, name)
+            if is_directory_junction(entry):
+                dirs.remove(name)
+                continue
+            if os.path.islink(entry):
+                dirs.remove(name)
+                failures.extend(_copy_entry(entry, os.path.join(target_root, name)))
+                continue
+            os.makedirs(extended_path(os.path.join(target_root, name)), exist_ok=True)
+        for name in files:
+            entry = os.path.join(root, name)
+            failures.extend(_copy_entry(entry, os.path.join(target_root, name)))
+    if failures:
+        raise shutil.Error(failures)
+    return destination
+
+
+def is_directory_junction(path):
+    """Report whether *path* is a Windows directory junction (mount point)."""
+    if os.name != 'nt':
+        return False
+    try:
+        import stat as stat_module
+        info = os.lstat(extended_path(path))
+    except OSError:
+        return False
+    return getattr(info, 'st_reparse_tag', 0) == stat_module.IO_REPARSE_TAG_MOUNT_POINT
+
+
+def _copy_entry(source, destination):
+    """Copy one file or link, returning ``shutil.Error`` style failures."""
+    if is_directory_junction(source):
+        return []
+    try:
+        if os.path.islink(source):
+            target = os.readlink(source)
+            try:
+                os.symlink(target, destination, target_is_directory=os.path.isdir(source))
+            except FileExistsError:
+                return []
+            except (OSError, NotImplementedError):
+                # Without the symbolic-link privilege the link cannot be
+                # recreated; a regular copy keeps the payload usable and the
+                # caller's symlink audit reports what was lost.
+                if os.path.isdir(source):
+                    os.makedirs(extended_path(destination), exist_ok=True)
+                else:
+                    shutil.copy2(extended_path(source), extended_path(destination))
+        else:
+            shutil.copy2(extended_path(source), extended_path(destination))
+    except OSError as error:
+        return [(source, destination, str(error))]
+    return []
+
+
+def raise_on_case_collisions(root):
+    """Refuse to continue when *root* cannot be represented on this filesystem.
+
+    Only a case-insensitive filesystem loses content, so the check is skipped
+    where the host is case sensitive by design.
+    """
+    if os.name != 'nt':
+        return
+    collisions = find_case_collisions(root)
+    if not collisions:
+        return
+    detail = describe_case_collisions(collisions, root)
+    raise LayoutError(
+        f"目录中存在仅大小写不同的名称（{detail}）。"
+        "Windows 文件系统区分不了它们，继续解包或回包会把两个目录的内容合并成一个，"
+        "生成的镜像与原始分区不一致。" + CASE_COLLISION_REMEDY
+    )
