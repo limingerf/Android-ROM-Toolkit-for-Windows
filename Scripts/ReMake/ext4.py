@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import struct
 import time
 
 from Scripts.Primary.Utils import (
@@ -59,8 +60,73 @@ def _ensure_symlinks(source, fsconfig):
     )
 
 
+EXT4_SUPER_MAGIC = 0xEF53
+
+
+# Read the original EXT4 geometry so a rebuild can reproduce it.
+def read_ext4_geometry(path):
+    """Return the superblock geometry of an EXT4 image, or ``None``.
+
+    ``vendor``/``odm`` are fixed-size dynamic partitions.  Rebuilding them with
+    a plain ``mke2fs`` produces a random UUID and mke2fs' own block/inode counts,
+    so the result no longer matches what the bootloader, the partition table and
+    fstab were built around - which is why those partitions used to be refused
+    once their workspace had been edited.  Reading the original values back lets
+    the rebuild keep the exact same filesystem shape.
+
+    A sparse image has no superblock at offset 1024, so ``None`` is returned and
+    the caller converts to raw first.
+    """
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(1024)
+            block = stream.read(1024)
+    except OSError:
+        return None
+    if len(block) < 512:
+        return None
+    if struct.unpack_from("<H", block, 56)[0] != EXT4_SUPER_MAGIC:
+        return None
+
+    def u32(offset):
+        return struct.unpack_from("<I", block, offset)[0]
+
+    def u16(offset):
+        return struct.unpack_from("<H", block, offset)[0]
+
+    log_block_size = u32(24)
+    inode_size = u16(88)
+    blocks = (u32(0x150) << 32) | u32(4)
+    if not blocks or log_block_size > 6 or inode_size < 128:
+        return None
+    block_size = 1024 << log_block_size
+    raw_uuid = block[104:120]
+    if raw_uuid == b"\x00" * 16:
+        return None
+    uuid = "%s-%s-%s-%s-%s" % (
+        raw_uuid[0:4].hex(), raw_uuid[4:6].hex(), raw_uuid[6:8].hex(),
+        raw_uuid[8:10].hex(), raw_uuid[10:16].hex(),
+    )
+    label = block[120:136].split(b"\x00")[0].decode("utf-8", "replace")
+    return {
+        "block_size": block_size,
+        "blocks": blocks,
+        "inodes": u32(0),
+        "inode_size": inode_size,
+        "first_ino": u32(84),
+        "blocks_per_group": u32(32),
+        "inodes_per_group": u32(40),
+        "uuid": uuid,
+        "volume_name": label,
+        "feature_compat": u32(92),
+        "feature_incompat": u32(96),
+        "feature_ro_compat": u32(100),
+        "size_bytes": blocks * block_size,
+    }
+
+
 # Prepare sizes, timestamps, metadata, and output paths.
-def _prepare(source, fsconfig, contexts, dumpinfo):
+def _prepare(source, fsconfig, contexts, dumpinfo, geometry=None):
     label = os.path.basename(source)
     os.makedirs(V.out, exist_ok=True)
     distance = os.path.join(V.out, f"{label}.img")
@@ -111,7 +177,25 @@ def _prepare(source, fsconfig, contexts, dumpinfo):
             pass
 
     block_size = 4096
+    inode_size = 256
+    inodes = None
+    if geometry:
+        # vendor/odm: reproduce the original filesystem exactly.  The partition
+        # size is fixed by the super metadata, so an enlarged image would not
+        # fit, and a shrunken one would leave the partition partly unformatted.
+        block_size = int(geometry.get("block_size") or block_size)
+        inode_size = int(geometry.get("inode_size") or inode_size)
+        inodes = int(geometry.get("inodes") or 0) or None
+        size = int(geometry.get("size_bytes") or size)
+        if not dumpinfo:
+            label_name = geometry.get("volume_name") or label
+            mount_point = "/" if os.path.isfile(
+                os.path.join(source, "system", "build.prop")
+            ) else f"/{label_name}"
     blocks = ceil(int(size) / block_size)
+    if geometry and geometry.get("blocks"):
+        blocks = int(geometry["blocks"])
+        size = blocks * block_size
     read_mode = "ro" if fsize else "rw"
     new_distance = os.path.join(V.out, f"{label}_new.img")
     if os.path.isfile(new_distance):
@@ -125,6 +209,10 @@ def _prepare(source, fsconfig, contexts, dumpinfo):
         "read_mode": read_mode,
         "mount_point": mount_point,
         "blocks": blocks,
+        "block_size": block_size,
+        "inode_size": inode_size,
+        "inodes": inodes,
+        "geometry": geometry,
     }
 
 
@@ -133,14 +221,16 @@ def _write_image(state, fsconfig, contexts, source, flag):
     label = state["label"]
     distance = state["distance"]
     new_distance = state["new_distance"]
+    geometry = state.get("geometry") or {}
+    volume_label = geometry.get("volume_name") or label
     mke2fs_cmd = [
         "mke2fs",
         "-O",
         "^has_journal,^metadata_csum,extent,huge_file,^flex_bg,^64bit,uninit_bg,dir_nlink,extra_isize",
         "-L",
-        label,
+        volume_label,
         "-I",
-        "256",
+        str(state.get("inode_size") or 256),
         "-M",
         state["mount_point"],
         "-m",
@@ -148,10 +238,15 @@ def _write_image(state, fsconfig, contexts, source, flag):
         "-t",
         "ext4",
         "-b",
-        "4096",
-        new_distance,
-        str(state["blocks"]),
+        str(state.get("block_size") or 4096),
     ]
+    if state.get("inodes"):
+        # Keep the original inode count: it decides how many files the partition
+        # can hold, and the value is part of what the vendor image was built with.
+        mke2fs_cmd += ["-N", str(state["inodes"])]
+    if geometry.get("uuid"):
+        mke2fs_cmd += ["-U", geometry["uuid"]]
+    mke2fs_cmd += [new_distance, str(state["blocks"])]
     e2fsdroid_cmd = [
         "e2fsdroid",
         "-e",
@@ -261,9 +356,15 @@ def _update_dynamic_partitions(label, distance, image_size=None):
 
 
 # Public EXT4 repack entry point.
-def recompress_ext4(source, fsconfig, contexts, dumpinfo, flag=8):
-    """Recompress a partition directory into an EXT4 image or DAT package."""
-    state = _prepare(source, fsconfig, contexts, dumpinfo)
+def recompress_ext4(source, fsconfig, contexts, dumpinfo, flag=8, geometry=None):
+    """Recompress a partition directory into an EXT4 image or DAT package.
+
+    ``geometry`` pins the filesystem to the shape of the original image
+    (block/inode counts, UUID, label).  It is required for vendor/odm once the
+    workspace has been edited, because those partitions are fixed-size and the
+    bootloader expects the original layout.
+    """
+    state = _prepare(source, fsconfig, contexts, dumpinfo, geometry=geometry)
     resize = (
         1
         if V.SETUP_MANIFEST["RESIZE_IMG"] == "1"

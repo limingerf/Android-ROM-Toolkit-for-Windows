@@ -181,6 +181,29 @@ def _logical_image_size(path):
     return path.stat().st_size
 
 
+def _fixed_ext4_geometry(source_image, scratch_dir):
+    """Filesystem geometry of the original vendor/odm image, or ``None``.
+
+    vendor/odm sit on fixed-size dynamic partitions, so a rebuild has to reuse
+    the original block/inode counts, UUID and label.  Sparse inputs are expanded
+    first because their superblock is not at offset 1024.
+    """
+    if source_image is None:
+        return None
+    from Scripts.ReMake.ext4 import read_ext4_geometry
+    from Scripts.Primary.ImageTools import is_sparse_image, sparse_to_raw
+    path = Path(source_image)
+    try:
+        if is_sparse_image(str(path)):
+            raw = Path(scratch_dir) / (path.stem + ".raw.img")
+            sparse_to_raw(str(path), str(raw), temp_dir=str(scratch_dir))
+            path = raw
+    except (OSError, ValueError) as error:
+        print(f"读取原始镜像几何失败: {error}", flush=True)
+        return None
+    return read_ext4_geometry(str(path))
+
+
 def _sweep_stale_transactions(root):
     """Remove abandoned job/publish directories left behind by killed jobs.
 
@@ -429,8 +452,21 @@ def _repack(controller, layout, stage, params):
         return {"outputs": _publish([(passthrough, layout.out_dir / passthrough.name)], replace=True,
                                     workspace=layout.workspace_dir),
                 "format": "img", "validation": "原镜像直通，保留 vendor/odm 原始几何结构；e2fsck -fn 通过"}
+    geometry = None
     if fixed_geometry:
-        raise ValueError("vendor/odm 工作区已修改，不能使用普通 EXT4 重建；请使用原位替换流程，或恢复为未修改状态")
+        # vendor/odm are fixed-size EXT4 partitions.  Once the workspace has been
+        # edited the image must be rebuilt around the new tree, but it has to keep
+        # the original geometry (block/inode counts, UUID, label) and the exact
+        # partition size, otherwise the super metadata and fstab no longer line
+        # up.  Pin the rebuild to the source image's geometry instead of refusing.
+        geometry = _fixed_ext4_geometry(source_image, stage.workspace_dir)
+        if geometry is None:
+            raise ValueError(
+                "vendor/odm 工作区已修改，但读不到原始镜像的 EXT4 几何信息。"
+                "请确认 INPUT 目录下仍有未修改的 <分区>.img，或把工作区恢复为未修改状态。"
+            )
+        V.SETUP_MANIFEST["REPACK_IMAGE_SIZE_BYTES"] = str(geometry["size_bytes"])
+        V.SETUP_MANIFEST["REPACK_IMAGE_SIZE"] = "auto"
     if original_format == "ext":
         for tool in ("mke2fs", "e2fsdroid", "e2fsck"):
             V.toolchain.resolve(tool)
@@ -455,7 +491,9 @@ def _repack(controller, layout, stage, params):
         if original_format == "ext":
             from Scripts.ReMake.ext4 import recompress_ext4
             info_path = stage.config_dir / (partition + "_info.txt")
-            recompress_ext4(copied, fsconfig, contexts, str(info_path) if info_path.is_file() else None, flag)
+            recompress_ext4(copied, fsconfig, contexts,
+                            str(info_path) if info_path.is_file() else None, flag,
+                            geometry=geometry)
         else:
             from Scripts.ReMake.erofs import recompress_erofs
             recompress_erofs(copied, fsconfig, contexts, None, flag)
@@ -472,6 +510,22 @@ def _repack(controller, layout, stage, params):
         if V.toolchain.run(["e2fsck", "-fn", str(check_image)]) != 0:
             raise RuntimeError("EXT4 文件系统检查未通过")
         validation = "e2fsck -fn 通过；尚未进行设备启动验证"
+        if geometry:
+            # A rebuilt vendor/odm must keep the exact shape of the original, or
+            # the partition no longer matches the super metadata and fstab.
+            from Scripts.ReMake.ext4 import read_ext4_geometry
+            rebuilt = read_ext4_geometry(str(check_image))
+            if rebuilt is None:
+                raise RuntimeError("回包产物不是可识别的 EXT4 镜像，已阻止发布")
+            drift = [key for key in ("block_size", "blocks", "inodes", "uuid")
+                     if rebuilt.get(key) != geometry.get(key)]
+            if drift:
+                raise RuntimeError(
+                    "vendor/odm 重建后的文件系统几何与原始镜像不一致（%s），已阻止发布"
+                    % "、".join(drift)
+                )
+            validation = ("保留原始 EXT4 几何（块大小/块数/inode/UUID）；"
+                          "e2fsck -fn 通过；尚未进行设备启动验证")
     # The job staged a copy of the metadata, so keep the labels completed
     # during this repack in the project file where the user can correct them.
     completed_contexts = stage.config_dir / (partition + "_contexts.txt")
