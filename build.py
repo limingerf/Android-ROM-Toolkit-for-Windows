@@ -7,6 +7,7 @@ import argparse
 import os
 import re
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -116,6 +117,27 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def run_pyinstaller() -> subprocess.CompletedProcess:
+    """Run PyInstaller and return its completed process.
+
+    PyInstaller writes its progress through the console code page, so on a
+    Chinese Windows host the stream carries GBK bytes.  Decoding that as UTF-8
+    raised UnicodeDecodeError and killed the build before it reported anything;
+    ask for UTF-8 and replace whatever still does not decode.
+    """
+    build_env = os.environ.copy()
+    build_env.setdefault('PYTHONIOENCODING', 'utf-8')
+    return subprocess.run(
+        pyinstaller_command(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        env=build_env,
+    )
+
+
 def main() -> None:
     args = parse_args()
     archive_name = f'A.R.T-Windows-amd64-v{args.version}.zip' if args.version else 'A.R.T-Windows-amd64.zip'
@@ -132,15 +154,9 @@ def main() -> None:
 
     # Step 2: PyInstaller (verbose output goes to build-call.log)
     _log('2/4', 'Compiling with PyInstaller...')
-    import subprocess
 
     log_file = ROOT / 'build-call.log'
-    result = subprocess.run(
-        pyinstaller_command(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    result = run_pyinstaller()
     log_file.write_text(result.stdout or '', encoding='utf-8')
 
     built_executable = DIST_DIR / ('art.exe' if os.name == 'nt' else 'art')
