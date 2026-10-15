@@ -16,6 +16,7 @@ from Scripts.Primary.Utils import (
 from Scripts.Primary.FileConfigPatcher import patch_contexts, patch_fsconfig, restore_symlinks
 from Scripts.Primary.Console import display
 from Scripts.Primary.WorkSpace import load_image_json
+from Scripts.Platform.runtime import tool_failure_message
 from Scripts.ReMake.dat_br import recompress_dat_br
 from Scripts.ReMake.metadata import normalize_metadata
 
@@ -37,10 +38,11 @@ def _ensure_symlinks(source, fsconfig):
     only way to keep the image faithful.
     """
     report = restore_symlinks(source, fsconfig)
-    if report["restored"] or report["failed"] or report["skipped"]:
+    if report["restored"] or report["failed"] or report["skipped"] or report.get("cygwin"):
         display(
             f"符号链接: 恢复 {report['restored']}，已存在 {report['present']}，"
-            f"跳过 {len(report['skipped'])}，失败 {len(report['failed'])}"
+            f"跳过 {len(report['skipped'])}，失败 {len(report['failed'])}，"
+            f"Cygwin 形态 {report.get('cygwin', 0)}（e2fsdroid 会直接重建）"
         )
     if not report["failed"]:
         return
@@ -263,20 +265,24 @@ def _write_image(state, fsconfig, contexts, source, flag):
         new_distance,
     ]
 
-    if call(mke2fs_cmd) != 0:
+    code = call(mke2fs_cmd)
+    if code != 0 or not os.path.isfile(new_distance):
         try:
             os.remove(new_distance)
         except OSError:
             pass
-        return False
-    if os.path.isfile(new_distance) and call(e2fsdroid_cmd) != 0:
+        raise RuntimeError(tool_failure_message("mke2fs", code, mke2fs_cmd))
+    code = call(e2fsdroid_cmd)
+    if code != 0:
         try:
             os.remove(new_distance)
         except OSError:
             pass
-        return False
+        raise RuntimeError(tool_failure_message("e2fsdroid", code, e2fsdroid_cmd))
     if not os.path.isfile(new_distance):
-        return False
+        raise RuntimeError(
+            "e2fsdroid 报告成功但没有生成镜像，请检查工作区是否完整（"
+            f"{source}）")
 
     print(" Done")
     # A sparse file is far smaller than the image it describes, because
@@ -286,12 +292,14 @@ def _write_image(state, fsconfig, contexts, source, flag):
     state["raw_size"] = os.path.getsize(new_distance)
     if V.SETUP_MANIFEST["REPACK_SPARSE_IMG"] == "1" or flag > 9:
         display("开始转换: sparse format ...")
-        if call(["img2simg", new_distance, distance]) != 0:
+        convert_cmd = ["img2simg", new_distance, distance]
+        code = call(convert_cmd)
+        if code != 0 or not os.path.isfile(distance):
             try:
                 os.remove(new_distance)
             except OSError:
                 pass
-            return False
+            raise RuntimeError(tool_failure_message("img2simg", code, convert_cmd))
         try:
             os.remove(new_distance)
         except OSError:

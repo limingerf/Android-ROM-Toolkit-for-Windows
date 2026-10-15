@@ -468,6 +468,33 @@ def _link_targets(fs_config: str) -> dict:
     return targets
 
 
+CYGWIN_SYMLINK_MAGIC = b"!<symlink>"
+
+
+def count_cygwin_symlinks(dir_path: str) -> int:
+    """Count the Cygwin-style symlinks an extraction left in the workspace.
+
+    The bundled extractor materializes a symlink as a system file whose content
+    is `!<symlink>` followed by the UTF-16 target.  Both bundled `mkfs.erofs`
+    and `e2fsdroid` are Cygwin builds, so they rebuild a real symlink from that
+    file; the entries are therefore complete and must not be reported as
+    missing links, and no `os.symlink` privilege is needed for them.
+    """
+    total = 0
+    for current, _dirs, files in os.walk(dir_path):
+        for name in files:
+            path = os.path.join(current, name)
+            try:
+                if os.path.getsize(path) < len(CYGWIN_SYMLINK_MAGIC):
+                    continue
+                with open(path, "rb") as handle:
+                    if handle.read(len(CYGWIN_SYMLINK_MAGIC)) == CYGWIN_SYMLINK_MAGIC:
+                        total += 1
+            except OSError:
+                continue
+    return total
+
+
 def _is_reparse_point(path: str) -> bool:
     """True for an NTFS junction or another reparse point."""
     isjunction = getattr(os.path, "isjunction", None)
@@ -515,7 +542,8 @@ def restore_symlinks(dir_path: str, fs_config: str) -> dict:
     targets = _link_targets(fs_config)
     base = os.path.dirname(os.path.abspath(dir_path))
     report = {"declared": len(targets), "restored": 0, "present": 0,
-              "failed": [], "skipped": []}
+              "failed": [], "skipped": [],
+              "cygwin": count_cygwin_symlinks(dir_path)}
     for image_path, target in targets.items():
         path = os.path.join(base, *image_path.split("/"))
         if os.path.islink(path):

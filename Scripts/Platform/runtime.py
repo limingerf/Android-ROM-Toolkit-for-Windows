@@ -1,6 +1,7 @@
 """Native host-tool resolution; Linux is preserved, WSL is opt-in."""
 from __future__ import annotations
 
+import collections
 import json
 import io
 import hashlib
@@ -105,6 +106,10 @@ class _ToolOutputDecoder:
         return lines
 
 
+# Bounded history of tool output, used to explain a tool failure to the user.
+TOOL_OUTPUT_TAIL: "collections.deque[str]" = collections.deque(maxlen=60)
+
+
 def _stream_tool_output(process, output: bool) -> int:
     """Drain both pipes concurrently and print decoded lines on one thread."""
     events = queue.Queue()
@@ -156,6 +161,9 @@ def _print_tool_output(value: str) -> None:
         elif character != "\x00":
             cleaned.append(character)
     value = "".join(cleaned)
+    # Keep the tail so a failed tool can be reported with the reason it printed
+    # instead of the caller's generic "no artifact" message.
+    TOOL_OUTPUT_TAIL.append(value.rstrip())
     try:
         print(value.rstrip(), flush=True)
     except UnicodeEncodeError:
@@ -163,6 +171,38 @@ def _print_tool_output(value: str) -> None:
         if stream is not None:
             stream.buffer.write((value.rstrip() + "\n").encode(stream.encoding or "utf-8", "replace"))
             stream.flush()
+
+
+def recent_tool_output(limit: int = 20) -> str:
+    """Return the last few lines a tool printed, oldest first.
+
+    Callers use this to explain a tool failure; the text is only ever shown to
+    the user and never parsed.
+    """
+    lines = [line for line in list(TOOL_OUTPUT_TAIL)[-limit:] if line]
+    return "\n".join(lines)
+
+
+def tool_failure_message(tool: str, code: int, command=None, limit: int = 12) -> str:
+    """Explain a failed tool run with the reason the tool itself printed.
+
+    Repack steps used to fail with a bare "no artifact was produced", which
+    hides the tool's own diagnosis (a missing fs_config entry, a full disk, a
+    file that cannot be read).  Keep the command, the exit code and the tail of
+    the output together so one log line is enough to act on.
+    """
+    lines = [f"{tool} 执行失败（退出码 {code}），未生成产物。"]
+    if command:
+        lines.append("命令: " + " ".join(str(item) for item in command))
+    detail = recent_tool_output(limit)
+    if detail:
+        lines.append("工具输出末尾:")
+        lines.append(detail)
+    else:
+        lines.append("工具未输出任何错误信息（可能被系统终止或无法启动）。")
+    lines.append("常见原因: fs_config/file_contexts 缺少该路径、磁盘空间不足、"
+                 "源文件被占用或无法读取。")
+    return "\n".join(lines)
 
 
 # Small, statically linked Windows builds maintained by the Android partition

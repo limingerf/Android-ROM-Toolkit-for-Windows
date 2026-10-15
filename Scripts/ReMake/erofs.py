@@ -14,6 +14,7 @@ from Scripts.Primary.Utils import (
 from Scripts.Primary.FileConfigPatcher import patch_contexts, patch_fsconfig, restore_symlinks
 from Scripts.Primary.Console import display
 from Scripts.Primary.WorkSpace import load_image_json
+from Scripts.Platform.runtime import recent_tool_output, tool_failure_message
 from Scripts.ReMake.dat_br import recompress_dat_br
 from Scripts.ReMake.metadata import normalize_metadata
 
@@ -33,10 +34,11 @@ def _ensure_symlinks(source, fsconfig):
     every other symlink as a regular file, which cannot boot.
     """
     report = restore_symlinks(source, fsconfig)
-    if report["restored"] or report["failed"] or report["skipped"]:
+    if report["restored"] or report["failed"] or report["skipped"] or report.get("cygwin"):
         display(
             f"符号链接: 恢复 {report['restored']}，已存在 {report['present']}，"
-            f"跳过 {len(report['skipped'])}，失败 {len(report['failed'])}"
+            f"跳过 {len(report['skipped'])}，失败 {len(report['failed'])}，"
+            f"Cygwin 形态 {report.get('cygwin', 0)}（mkfs.erofs 会直接重建）"
         )
     if not report["failed"]:
         return
@@ -114,6 +116,23 @@ def _prepare(source, fsconfig, contexts, dumpinfo):
 
 
 # Build EROFS and optionally convert to sparse/DAT.
+def _warn_if_output_volume_is_tight(path, size):
+    """Warn before a long pack when the output volume cannot hold the image.
+
+    The estimate is the uncompressed upper bound, so this only reports a real
+    risk; mkfs.erofs reports the definitive error when it runs out of space.
+    """
+    try:
+        free = shutil.disk_usage(os.path.dirname(os.path.abspath(path))).free
+    except OSError:
+        return
+    if free < size:
+        display(
+            f"{RED}警告: 输出卷剩余空间 {free / 2 ** 30:.1f} GiB 小于工作区估算大小 "
+            f"{size / 2 ** 30:.1f} GiB，回包可能因空间不足失败{CLOSE}"
+        )
+
+
 def _write_image(state, fsconfig, contexts, source, flag):
     label = state["label"]
     distance = state["distance"]
@@ -153,13 +172,18 @@ def _write_image(state, fsconfig, contexts, source, flag):
         ]
     )
 
-    if call(mkerofs_cmd) != 0:
+    # mkfs.erofs streams its reason for failing (missing fs_config entry, out of
+    # space, unreadable file) to the log, but the caller only sees the generic
+    # "no artifact" error.  Report the tool's own message with the failure so a
+    # broken workspace can be diagnosed instead of guessed at.
+    _warn_if_output_volume_is_tight(new_distance, state.get("size") or 0)
+    code = call(mkerofs_cmd)
+    if code != 0 or not os.path.isfile(new_distance):
         try:
             os.remove(new_distance)
         except OSError:
             pass
-    if not os.path.isfile(new_distance):
-        return False
+        raise RuntimeError(tool_failure_message("mkfs.erofs", code, mkerofs_cmd))
 
     print(" Done")
     # A sparse file is far smaller than the image it describes, because
@@ -170,12 +194,14 @@ def _write_image(state, fsconfig, contexts, source, flag):
     state["raw_size"] = os.path.getsize(new_distance)
     if V.SETUP_MANIFEST["REPACK_SPARSE_IMG"] == "1" or flag > 9:
         display("开始转换: sparse format ...")
-        if call(["img2simg", new_distance, distance]) != 0:
+        convert_cmd = ["img2simg", new_distance, distance]
+        code = call(convert_cmd)
+        if code != 0 or not os.path.isfile(distance):
             try:
                 os.remove(new_distance)
             except OSError:
                 pass
-            return False
+            raise RuntimeError(tool_failure_message("img2simg", code, convert_cmd))
         try:
             os.remove(new_distance)
         except OSError:
