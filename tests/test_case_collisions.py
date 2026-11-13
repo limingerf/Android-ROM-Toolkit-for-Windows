@@ -1,11 +1,9 @@
 """Case-insensitive filesystem collisions.
 
 Android filesystems are case sensitive, so a partition can contain both
-``ES-Vodafone`` and ``es-vodafone``.  Windows cannot store both names in one
-directory: the extraction merges them, ``shutil.copytree`` aborts with a bare
-``WinError 183``, and a tolerant copy silently drops one tree.  These tests
-cover the detection that turns the failure into an actionable message, and the
-replacement copier that never depends on ``copytree``'s mkdir behaviour.
+``ES-Vodafone`` and ``es-vodafone``. Windows can preserve both when NTFS
+directory flags are enabled, but the repack stage must inherit those flags.
+These tests cover the flag-aware preflight and case-preserving copier.
 """
 
 import os
@@ -20,7 +18,9 @@ from Scripts.Primary.Utils import (
     LayoutError,
     copy_tree,
     describe_case_collisions,
+    enable_case_sensitive_directory,
     find_case_collisions,
+    is_case_sensitive_directory,
     is_directory_junction,
     raise_on_case_collisions,
 )
@@ -29,12 +29,13 @@ from Scripts.Primary.Utils import (
 def make_collision(root, upper="ES-Vodafone", lower="es-vodafone"):
     """Create two directories whose names differ only in case.
 
-    Returns True when the filesystem accepted both names.  NTFS accepts them
-    through its POSIX namespace, which is how the extraction produced the
-    colliding workspace in the first place; a filesystem that refuses the
-    second name cannot be tested this way.
+    Returns True when the filesystem accepted both names. Windows requires the
+    parent directory's case-sensitive flag to be enabled before either child
+    is created.
     """
     root = Path(root)
+    if not enable_case_sensitive_directory(root):
+        return False
     (root / upper).mkdir(parents=True, exist_ok=True)
     try:
         (root / lower).mkdir()
@@ -194,12 +195,39 @@ class RaiseOnCaseCollisionsTests(unittest.TestCase):
             with mock.patch(
                 "Scripts.Primary.Utils.find_case_collisions", return_value=collisions
             ):
-                with self.assertRaises(LayoutError) as caught:
-                    raise_on_case_collisions(self.root)
+                with mock.patch(
+                    "Scripts.Primary.Utils.is_case_sensitive_directory", return_value=False
+                ):
+                    with self.assertRaises(LayoutError) as caught:
+                        raise_on_case_collisions(self.root)
         message = str(caught.exception)
         self.assertIn("ES-Vodafone / es-vodafone", message)
         self.assertIn("etc", message)
         self.assertIn(CASE_COLLISION_REMEDY, message)
+
+    def test_allows_collisions_in_a_case_sensitive_directory(self):
+        collisions = [(str(self.root / "etc"), "dir", ["ES-Vodafone", "es-vodafone"])]
+        with mock.patch("Scripts.Primary.Utils.os.name", "nt"):
+            with mock.patch(
+                "Scripts.Primary.Utils.find_case_collisions", return_value=collisions
+            ):
+                with mock.patch(
+                    "Scripts.Primary.Utils.is_case_sensitive_directory", return_value=True
+                ):
+                    self.assertIsNone(raise_on_case_collisions(self.root))
+
+
+class CaseSensitiveDirectoryTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="art-case-flag-"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def test_new_child_inherits_case_sensitivity(self):
+        if not enable_case_sensitive_directory(self.root):
+            self.skipTest("this filesystem cannot enable per-directory case sensitivity")
+        child = self.root / "job"
+        child.mkdir()
+        self.assertTrue(is_case_sensitive_directory(child))
 
 
 class CopyTreeTests(unittest.TestCase):
@@ -280,23 +308,30 @@ class CopyTreeTests(unittest.TestCase):
         link.assert_called_once()
         self.assertTrue(link.call_args.kwargs["target_is_directory"])
 
-    def test_merges_a_case_collision_without_raising(self):
-        # The pre-copy audit refuses this tree; if the copy is reached anyway it
-        # must not abort with WinError 183 half way through.
-        (self.source / "extension" / "ES-Vodafone").mkdir(parents=True)
+    def test_copies_case_collisions_without_merging(self):
+        extension = self.source / "extension"
+        extension.mkdir()
+        if not enable_case_sensitive_directory(extension):
+            self.skipTest("this filesystem cannot enable per-directory case sensitivity")
+        # The source parent and the fresh copy root must both be case sensitive.
+        (extension / "ES-Vodafone").mkdir()
         (self.source / "extension" / "ES-Vodafone" / "a.txt").write_text(
             "upper", encoding="utf-8"
         )
-        try:
-            (self.source / "extension" / "es-vodafone").mkdir()
-        except (FileExistsError, OSError):
-            self.skipTest("this filesystem cannot store two case-variant names")
+        (extension / "es-vodafone").mkdir()
         (self.source / "extension" / "es-vodafone" / "b.txt").write_text(
             "lower", encoding="utf-8"
         )
         (self.source / "after.txt").write_text("later", encoding="utf-8")
         copy_tree(self.source, self.destination)
-        # The copy completes and every later entry still lands.
+        self.assertEqual(
+            (self.destination / "extension" / "ES-Vodafone" / "a.txt").read_text(encoding="utf-8"),
+            "upper",
+        )
+        self.assertEqual(
+            (self.destination / "extension" / "es-vodafone" / "b.txt").read_text(encoding="utf-8"),
+            "lower",
+        )
         self.assertTrue((self.destination / "after.txt").is_file())
 
     def test_merges_a_collision_reported_by_the_walk(self):
@@ -309,7 +344,10 @@ class CopyTreeTests(unittest.TestCase):
             (str(self.source / "extension"), ["ES-Vodafone", "es-vodafone"], ["a.txt"]),
         ]
         with mock.patch("Scripts.Primary.Utils.os.walk", return_value=walk_result):
-            copy_tree(self.source, self.destination)
+            with mock.patch(
+                "Scripts.Primary.Utils.is_case_sensitive_directory", return_value=True
+            ):
+                copy_tree(self.source, self.destination)
         self.assertTrue((self.destination / "extension" / "a.txt").is_file())
 
     def test_reports_an_unreadable_source_file(self):

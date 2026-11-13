@@ -104,7 +104,7 @@ class ArtController:
     # controller so the Qt front end and MCP use the same path validation and
     # never have to reach into the legacy ``V`` globals.
     def delete_project(self, project: str) -> dict:
-        """Delete a project after enforcing the direct-child/safe-layout rule."""
+        """Delete A.R.T-managed directories while preserving named staging/backup data."""
         project_dir = Path(project).expanduser()
         if not project_dir.is_absolute():
             project_dir = self.root / project_dir
@@ -117,8 +117,30 @@ class ArtController:
             raise ValueError("工程名称或路径无效")
         if project_dir.is_symlink() or not project_dir.is_dir():
             raise ValueError("工程目录不存在或不是目录")
-        remove_tree(project_dir)
-        return {"name": project_dir.name, "deleted": True}
+        layout = ProjectLayout(project_dir)
+        if layout.state() not in {"new", "incomplete", "unsupported"}:
+            raise ValueError("工程目录状态无效，拒绝删除")
+        preserved = []
+        entries = tuple(project_dir.iterdir())
+        for child in entries:
+            if child.name in {"INPUT", "OUT", "WORKSPACE", "OTA_WORK"}:
+                continue
+            if (child.name.startswith(("BACKUP_", "STAGING_"))
+                    and child.is_dir() and not child.is_symlink()):
+                preserved.append(child.name)
+            elif (child.name.startswith("BACKUP_") and child.name.endswith("_LATEST.txt")
+                  and child.is_file() and not child.is_symlink()):
+                preserved.append(child.name)
+            elif child.name.startswith("."):
+                continue
+            else:
+                raise ValueError(f"存在未识别的工程根目录项，拒绝删除: {child.name}")
+        for child in entries:
+            if child.name in {"INPUT", "OUT", "WORKSPACE", "OTA_WORK"} or child.name.startswith("."):
+                remove_tree(child)
+        if not preserved:
+            project_dir.rmdir()
+        return {"name": project_dir.name, "deleted": not preserved, "preserved": preserved}
 
     def get_settings(self) -> dict:
         """Read the CLI manifest, filling newly introduced defaults."""

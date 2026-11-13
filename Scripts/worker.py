@@ -13,7 +13,9 @@ import hashlib
 from pathlib import Path
 
 from Scripts.application import ArtController, ROOT
-from Scripts.Primary.Utils import copy_tree, raise_on_case_collisions, remove_tree
+from Scripts.Primary.Utils import (
+    copy_tree, enable_case_sensitive_directory, raise_on_case_collisions, remove_tree,
+)
 from Scripts.Primary.WorkSpace import LayoutError, ProjectLayout, partition_name
 
 def _emit(event, **payload):
@@ -68,6 +70,24 @@ def _bind(layout, sparse=False, root=None):
     V.toolchain = detect_toolchain(root)
 
 def _publish(pairs, *, replace=False, workspace=None):
+    def _make_writable(path):
+        """Allow replacement of read-only artifacts on Windows.
+
+        Extracted ROM metadata and old OUT images often inherit the source
+        archive's read-only bit.  ``os.replace`` then fails during the
+        transaction backup even though the destination is inside the project.
+        Only clear the write-protection bit; ownership and other mode bits are
+        left intact.
+        """
+        try:
+            # On Windows the DOS read-only attribute is not consistently
+            # reflected in ``st_mode``.  Setting a normal writable file mode
+            # unconditionally is safe here because the file is about to be
+            # moved into a private transaction directory or replaced.
+            os.chmod(path, 0o666)
+        except OSError:
+            pass
+
     # Preflight all names before moving any staged artifact.
     for source, destination in pairs:
         if not source.exists():
@@ -99,6 +119,7 @@ def _publish(pairs, *, replace=False, workspace=None):
         backup_dir = Path(tempfile.mkdtemp(prefix=".art-backup-", dir=workspace))
         for index, (_source, destination) in enumerate(pairs):
             if destination.exists() or destination.is_symlink():
+                _make_writable(destination)
                 backup = backup_dir / str(index)
                 os.replace(destination, backup)
                 backups.append((backup, destination))
@@ -111,9 +132,11 @@ def _publish(pairs, *, replace=False, workspace=None):
     except Exception:
         for source, destination in reversed(moved):
             if destination.exists() or destination.is_symlink():
+                _make_writable(destination)
                 os.replace(destination, source)
         for backup, destination in reversed(backups):
             if backup.exists() or backup.is_symlink():
+                _make_writable(backup)
                 os.replace(backup, destination)
         if backup_dir:
             remove_tree(backup_dir, ignore_errors=True)
@@ -136,6 +159,34 @@ def _tree_fingerprint(root):
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
     return digest.hexdigest()
+
+
+def _repack_artifacts(out_dir, partition, target):
+    """Return only the files produced for the requested partition format.
+
+    Repack helpers also write ``dynamic_partitions_op_list`` into OUT as
+    metadata for later super-image work. It is not a partition artifact and
+    may be held open by the GUI, so treating every file in the staging OUT
+    directory as a publish candidate can make a valid image fail at the final
+    rename step. Keep the publish transaction scoped to the requested image
+    or OTA package and its transfer list.
+    """
+    out_dir = Path(out_dir)
+    if target == "img":
+        names = [f"{partition}.img"]
+    elif target == "dat":
+        names = [f"{partition}.new.dat", f"{partition}.transfer.list"]
+    elif target == "dat.br":
+        names = [f"{partition}.new.dat.br", f"{partition}.transfer.list"]
+    else:
+        raise ValueError(f"不支持的回包格式: {target}")
+    artifacts = [out_dir / name for name in names if (out_dir / name).is_file()]
+    if not artifacts:
+        raise RuntimeError(f"回包失败，未生成 {partition} 的 {target} 产物")
+    missing = [name for name in names if not (out_dir / name).is_file()]
+    if target != "img" and missing:
+        raise RuntimeError(f"回包缺少配套产物：{', '.join(missing)}")
+    return artifacts
 
 
 def _file_sha256(path):
@@ -238,6 +289,15 @@ def execute(request):
     _sweep_stale_transactions(layout.workspace_dir)
     _sweep_stale_transactions(layout.project_dir)
     with tempfile.TemporaryDirectory(prefix=".art-job-", dir=layout.workspace_dir) as temporary:
+        if operation == "extract" and os.name == "nt":
+            # Case sensitivity cannot be enabled on a populated directory. Set
+            # the flag on the empty job root before ProjectLayout creates any
+            # children; NTFS then propagates it to the extracted partition tree.
+            if not enable_case_sensitive_directory(temporary):
+                raise LayoutError(
+                    f"无法为本次解包启用 Windows 目录大小写敏感: {temporary}。"
+                    "请开启 Windows 开发者模式或以管理员身份运行应用后重试，或改用 WSL。"
+                )
         stage = ProjectLayout(Path(temporary) / "stage").initialize()
         _bind(stage, params.get("sparse", False), controller.root)
         if operation == "extract":
@@ -255,6 +315,12 @@ def execute(request):
 def _extract(controller, layout, stage, params):
     from Scripts.Primary.ImageTools import get_file_type
     from Scripts.Extract.image import decompress_img
+    if os.name == "nt":
+        # The job's empty temporary root was marked before initialization, so
+        # these directories should inherit case sensitivity from NTFS.
+        for directory in (stage.workspace_dir, stage.input_dir, stage.out_dir, stage.config_dir):
+            if not enable_case_sensitive_directory(directory):
+                raise LayoutError(f"本次解包工作目录未启用大小写敏感: {directory}")
     sources = params.get("sources")
     if sources is None:
         sources = [str(p) for p in layout.input_dir.iterdir() if p.is_file()
@@ -297,10 +363,8 @@ def _extract(controller, layout, stage, params):
             shutil.copyfile(source, copied)
             if not decompress_img(str(copied), str(stage.workspace_dir / name)):
                 raise RuntimeError(f"{source.name} 解包失败，原工作区保持不变")
-            # A partition may hold two names that differ only in case.  Windows
-            # cannot store both, so the extraction silently merged them and the
-            # workspace no longer matches the image; stop before the user edits
-            # a tree that can never be repacked faithfully.
+            # Confirm that the extractor preserved case-variant names in the
+            # case-sensitive staging tree before publishing it to the project.
             raise_on_case_collisions(stage.workspace_dir / name)
             # Keep an immutable baseline so a later repack can distinguish a
             # clean extraction from a workspace that the user edited.
@@ -475,10 +539,6 @@ def _repack(controller, layout, stage, params):
     if original_format == "ext":
         for tool in ("mke2fs", "e2fsdroid", "e2fsck"):
             V.toolchain.resolve(tool)
-    # Refuse before copying: shutil.copytree aborts with a bare WinError 183 on
-    # a case collision, which names neither the directory nor the cause, and a
-    # tolerant copy would silently merge the two trees.
-    raise_on_case_collisions(source)
     copy_tree(source, stage.workspace_dir / partition)
     for meta in layout.config_dir.glob(partition + "_*"):
         shutil.copy2(meta, stage.config_dir / meta.name)
@@ -506,9 +566,7 @@ def _repack(controller, layout, stage, params):
         else:
             from Scripts.ReMake.erofs import recompress_erofs
             recompress_erofs(copied, fsconfig, contexts, None, flag)
-    artifacts = [p for p in stage.out_dir.iterdir() if p.is_file() and not p.name.endswith("_new.img")]
-    if not artifacts:
-        raise RuntimeError("回包失败，未生成产物")
+    artifacts = _repack_artifacts(stage.out_dir, partition, target)
     validation = "工具成功返回；尚未进行设备启动验证"
     image = stage.out_dir / (partition + ".img")
     if original_format == "ext" and image.is_file():

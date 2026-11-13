@@ -11,6 +11,7 @@ Three defects are covered here:
   became ``system_a.sparse.raw.img`` and later resolved to a bogus partition.
 """
 import os
+import stat
 import struct
 import tempfile
 import time
@@ -141,11 +142,26 @@ class PublishTransactionTests(unittest.TestCase):
         self.assertEqual(destination.read_bytes(), b"old")
         self.assertEqual(self._leftovers(), [])
 
+    def test_publish_replaces_read_only_existing_artifact(self):
+        destination = self.layout.out_dir / "readonly.img"
+        destination.write_bytes(b"old")
+        os.chmod(destination, stat.S_IREAD)
+        staged = self.stage.out_dir / "readonly.img"
+        staged.write_bytes(b"new")
+        _publish([(staged, destination)], replace=True, workspace=self.layout.workspace_dir)
+        self.assertEqual(destination.read_bytes(), b"new")
+
     def test_project_with_a_stale_transaction_directory_is_still_supported(self):
         (self.layout.project_dir / ".art-backup-stale").mkdir()
         self.assertEqual(self.layout.state(), "new")
 
-    def test_a_visible_extra_directory_still_means_unsupported(self):
+    def test_named_backup_and_staging_directories_are_supported(self):
+        (self.layout.project_dir / "STAGING_camera").mkdir()
+        (self.layout.project_dir / "BACKUP_before_pack").mkdir()
+        (self.layout.project_dir / "BACKUP_latest_LATEST.txt").write_text("backup", encoding="utf-8")
+        self.assertEqual(self.layout.state(), "new")
+
+    def test_an_unrecognized_visible_extra_directory_is_unsupported(self):
         (self.layout.project_dir / "legacy").mkdir()
         self.assertEqual(self.layout.state(), "unsupported")
 

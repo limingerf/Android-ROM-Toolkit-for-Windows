@@ -1268,11 +1268,16 @@ class ULTRAMAN(object):
                 target.relative_to(output_root)
             except ValueError as error:
                 raise ImageExtractionError(f'EXT4 路径越界: {components!r}') from error
-            if target in seen_targets:
+            # pathlib's WindowsPath equality is case-insensitive even when the
+            # backing NTFS directory is marked case-sensitive. Compare the
+            # original image components instead so Android case variants stay
+            # distinct while exact duplicate paths are still rejected.
+            target_key = tuple(components)
+            if target_key in seen_targets:
                 raise ImageExtractionError(f'EXT4 路径冲突: {target}')
             if target.parent.is_symlink() or not target.parent.is_dir():
                 raise ImageExtractionError(f'EXT4 父目录无效: {target.parent}')
-            seen_targets.add(target)
+            seen_targets.add(target_key)
             return target
 
         def read_link(inode, volume):

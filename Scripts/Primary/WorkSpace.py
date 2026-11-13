@@ -37,6 +37,7 @@ _SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 # the supported project root once those tools are used, while remaining
 # optional for newly-created projects.
 _ROOT_DIRS = frozenset({"INPUT", "OUT", "WORKSPACE", "OTA_WORK"})
+_AUXILIARY_DIR_PREFIXES = ("BACKUP_", "STAGING_")
 _RESERVED_WORKSPACE_NAMES = frozenset({"config", "INPUT", "OUT", "WORKSPACE"})
 
 
@@ -132,8 +133,23 @@ class ProjectLayout:
         # project look unsupported: a stale `.art-backup-*` in the project root
         # used to block every later operation with "不兼容的目录布局".
         entries = {entry.name for entry in root_entries if not entry.name.startswith(".")}
-        if entries - _ROOT_DIRS:
-            return "unsupported"
+        for entry in root_entries:
+            if entry.name.startswith(".") or entry.name in _ROOT_DIRS:
+                continue
+            is_auxiliary_dir = (
+                entry.name.startswith(_AUXILIARY_DIR_PREFIXES)
+                and entry.is_dir()
+                and not entry.is_symlink()
+                and self._is_safe_directory(entry, self.project_dir)
+            )
+            is_backup_pointer = (
+                entry.name.startswith("BACKUP_")
+                and entry.name.endswith("_LATEST.txt")
+                and entry.is_file()
+                and not entry.is_symlink()
+            )
+            if not (is_auxiliary_dir or is_backup_pointer):
+                return "unsupported"
         if any(entry.name in _ROOT_DIRS and (entry.is_symlink() or not entry.is_dir())
                for entry in root_entries):
             return "unsupported"

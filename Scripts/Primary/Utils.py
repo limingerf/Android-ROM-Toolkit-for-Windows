@@ -298,16 +298,97 @@ def findfile(file, dir_) -> str:
 # Case-insensitive filesystem collisions
 # ---------------------------------------------------------------------------
 # Android filesystems are case sensitive, so one directory can hold both
-# "ES-Vodafone" and "es-vodafone".  NTFS is case insensitive for every Win32
-# caller: the second name resolves to the first, so creating it fails with
-# WinError 183 and copying it would silently merge two different trees into
-# one.  Detect the collision instead of losing content or crashing with a
-# message that names neither the directory nor the cause.
+# "ES-Vodafone" and "es-vodafone". NTFS supports this when the parent directory
+# has its case-sensitive flag enabled; unmarked directories can merge the names.
+# Verify the actual parent flag before refusing an operation.
 CASE_COLLISION_REMEDY = (
-    "请开启 Windows 开发者模式（或以管理员身份运行），在解包前对工作区启用目录大小写敏感"
-    "（fsutil file setCaseSensitiveInfo <工作区> enable）后重新解包，"
-    "或改用 WSL 后端；直接继续会丢失其中一个目录的内容。"
+    "请开启 Windows 开发者模式（或以管理员身份运行应用）后重新解包，"
+    "让程序在创建分区目录前启用大小写敏感；也可改用 WSL 后端。"
+    "不要在已包含内容的目录上直接运行 fsutil，Windows 不允许事后更改该标记。"
 )
+
+
+def _case_sensitive_info(path, *, set_enabled=False):
+    """Query or set the NTFS per-directory case-sensitive flag."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FileCaseSensitiveInfo(ctypes.Structure):
+            _fields_ = [("Flags", wintypes.ULONG)]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = (
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        )
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.GetFileInformationByHandleEx.argtypes = (
+            wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD,
+        )
+        kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+        kernel32.SetFileInformationByHandle.argtypes = (
+            wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD,
+        )
+        kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        path = os.path.abspath(os.fspath(path))
+        access = 0x80 | (0x100 if set_enabled else 0)  # FILE_READ/WRITE_ATTRIBUTES
+        handle = kernel32.CreateFileW(
+            path, access, 0x1 | 0x2 | 0x4, None, 3, 0x02000000, None,
+        )
+        if handle == ctypes.c_void_p(-1).value:
+            return False
+        try:
+            info = FileCaseSensitiveInfo()
+            if not kernel32.GetFileInformationByHandleEx(
+                handle, 23, ctypes.byref(info), ctypes.sizeof(info),
+            ):
+                return False
+            if info.Flags & 1:
+                return True
+            if not set_enabled:
+                return False
+            info.Flags |= 1
+            return bool(kernel32.SetFileInformationByHandle(
+                handle, 23, ctypes.byref(info), ctypes.sizeof(info),
+            ))
+        finally:
+            kernel32.CloseHandle(handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+def is_case_sensitive_directory(path):
+    """Return whether a directory distinguishes case-variant child names."""
+    return _case_sensitive_info(path)
+
+
+def enable_case_sensitive_directory(path):
+    """Enable case-sensitive child names on an existing directory."""
+    path = Path(path)
+    if path.is_symlink() or is_directory_junction(path) or not path.is_dir():
+        return False
+    return _case_sensitive_info(path, set_enabled=True)
+
+
+def _raise_unrepresentable_case_collisions(root, collisions):
+    collisions = [
+        item for item in collisions
+        if not is_case_sensitive_directory(item[0])
+    ]
+    if not collisions:
+        return
+    detail = describe_case_collisions(collisions, root)
+    raise LayoutError(
+        f"目录中存在未启用大小写敏感的冲突名称（{detail}）。"
+        "Windows 无法在该目录中分别访问这些名称，继续操作可能合并内容。"
+        + CASE_COLLISION_REMEDY
+    )
 
 
 def _colliding_names(names):
@@ -371,9 +452,9 @@ def copy_tree(source, destination):
 
     ``shutil.copytree`` cannot be used here: it calls ``os.makedirs`` without
     ``exist_ok`` for every directory it meets, so on Windows a partition that
-    contains two names differing only in case aborts the whole copy with
-    ``WinError 183``.  This walk creates directories idempotently, recreates
-    symbolic links (including directory links) and keeps file metadata.
+    contains two names differing only in case can abort with ``WinError 183``.
+    For a case-sensitive source tree, this walk marks the fresh destination
+    root before creating children, then copies names and metadata exactly.
 
     Directory junctions are skipped: they are a Windows-only mount point that
     ``os.walk`` follows even with ``followlinks=False``, so descending into one
@@ -381,7 +462,14 @@ def copy_tree(source, destination):
     """
     source = os.fspath(source)
     destination = os.fspath(destination)
+    collisions = find_case_collisions(source) if os.name == "nt" else []
+    _raise_unrepresentable_case_collisions(source, collisions)
     os.makedirs(extended_path(destination), exist_ok=True)
+    if collisions and not enable_case_sensitive_directory(destination):
+        raise LayoutError(
+            f"无法为回包暂存目录启用大小写敏感: {destination}。"
+            "请开启 Windows 开发者模式或以管理员身份运行应用后重试回包，或改用 WSL。"
+        )
     failures = []
     for root, dirs, files in os.walk(source, followlinks=False):
         relative = os.path.relpath(root, source)
@@ -445,17 +533,11 @@ def _copy_entry(source, destination):
 def raise_on_case_collisions(root):
     """Refuse to continue when *root* cannot be represented on this filesystem.
 
-    Only a case-insensitive filesystem loses content, so the check is skipped
-    where the host is case sensitive by design.
+    On Windows, collisions are safe only when their containing directories have
+    the NTFS case-sensitive flag enabled. POSIX hosts preserve these names by
+    default and do not need the check.
     """
     if os.name != 'nt':
         return
     collisions = find_case_collisions(root)
-    if not collisions:
-        return
-    detail = describe_case_collisions(collisions, root)
-    raise LayoutError(
-        f"目录中存在仅大小写不同的名称（{detail}）。"
-        "Windows 文件系统区分不了它们，继续解包或回包会把两个目录的内容合并成一个，"
-        "生成的镜像与原始分区不一致。" + CASE_COLLISION_REMEDY
-    )
+    _raise_unrepresentable_case_collisions(root, collisions)
