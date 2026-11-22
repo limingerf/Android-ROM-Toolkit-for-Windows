@@ -11,5 +11,6 @@
     "GROUP_NAME": "qti_dynamic_partitions",
     "UTC": "LIVE",
     "UNPACK_SPLIT_DAT": "15",
-    "BOOT_SKIP_RAMDISK": "0"
+    "BOOT_SKIP_RAMDISK": "0",
+    "ALLOW_SYMLINK_LOSS": "0"
 }
