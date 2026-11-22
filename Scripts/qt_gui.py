@@ -192,13 +192,24 @@ class StyledDialog(QDialog):
 
 
 class ArtWindow(QMainWindow):
+    # Without a native frame Windows never performs the non-client hit test,
+    # so the resize cursor has to follow the app's own 7px edge detection.
+    _EDGE_CURSORS = {
+        "tl": Qt.CursorShape.SizeFDiagCursor, "br": Qt.CursorShape.SizeFDiagCursor,
+        "tr": Qt.CursorShape.SizeBDiagCursor, "bl": Qt.CursorShape.SizeBDiagCursor,
+        "l": Qt.CursorShape.SizeHorCursor, "r": Qt.CursorShape.SizeHorCursor,
+        "t": Qt.CursorShape.SizeVerCursor, "b": Qt.CursorShape.SizeVerCursor,
+    }
+
     def __init__(self, controller: ArtController):
         super().__init__()
         # A Qt-drawn frame avoids the native title bar's second composition
         # surface.  The edge resize handler below keeps normal desktop window
         # behavior without relying on platform-specific non-client painting.
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # A translucent top-level window flickers on Windows while shrinking
+        # horizontally, so the window stays opaque and resizeEvent applies the
+        # rounded mask for the window shape.
         self.controller = controller
         self.events: queue.Queue = queue.Queue()
         self.process = None
@@ -223,11 +234,13 @@ class ArtWindow(QMainWindow):
         self._resize_mode = None
         self._resize_start_pos = None
         self._resize_start_geometry = None
+        self._edge_cursor = None
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
         self._apply_style()
         self._build_ui()
+        self._enable_edge_cursor()
         self.refresh()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll)
@@ -262,6 +275,10 @@ class ArtWindow(QMainWindow):
         return root / "assets" / "android-rom-toolkit.ico"
 
     def _toggle_maximize(self):
+        # Maximized windows have no resizable edges; forget the cached shape
+        # so the next hover move re-applies the correct cursor.
+        self._edge_cursor = None
+        self.unsetCursor()
         if self.isMaximized():
             self.showNormal()
             self.titlebar.maximize.setText("□")
@@ -295,6 +312,8 @@ class ArtWindow(QMainWindow):
                 mode = self._resize_hit_test(local)
                 if mode:
                     self._resize_mode = mode
+                    self._edge_cursor = self._EDGE_CURSORS[mode]
+                    self.setCursor(self._edge_cursor)
                     self._resize_start_pos = point
                     handle = self.windowHandle()
                     edges = {"l": Qt.Edge.LeftEdge, "r": Qt.Edge.RightEdge,
@@ -308,6 +327,9 @@ class ArtWindow(QMainWindow):
                         return True
                     self._resize_start_geometry = self.geometry()
                     return True
+            elif event.type() == QEvent.Type.MouseMove and not (event.buttons() & Qt.MouseButton.LeftButton):
+                self._resize_mode = None
+                self._update_edge_cursor(local)
             elif event.type() == QEvent.Type.MouseMove and self._resize_mode:
                 if event.buttons() & Qt.MouseButton.LeftButton:
                     self._resize_by_delta(point)
@@ -316,7 +338,10 @@ class ArtWindow(QMainWindow):
             elif event.type() == QEvent.Type.MouseButtonRelease and self._resize_mode:
                 self._resize_by_delta(point)
                 self._resize_mode = None
+                self._update_edge_cursor(local)
                 return True
+            elif event.type() == QEvent.Type.MouseButtonRelease:
+                self._update_edge_cursor(local)
         return super().eventFilter(watched, event)
 
     def _resize_hit_test(self, point):
@@ -353,6 +378,25 @@ class ArtWindow(QMainWindow):
         if "b" in mode:
             height = max(min_height, height + delta.y())
         self.setGeometry(left, top, width, height)
+
+    def _enable_edge_cursor(self):
+        # Frameless windows get no native non-client hit test, and Qt does
+        # not deliver button-less mouse moves by default.  Track hover moves
+        # so the edge cursor can follow the window's own hit test.
+        self.setMouseTracking(True)
+        for widget in self.findChildren(QWidget):
+            widget.setMouseTracking(True)
+
+    def _update_edge_cursor(self, local):
+        mode = None if self.isMaximized() else self._resize_hit_test(local)
+        shape = self._EDGE_CURSORS.get(mode)
+        if shape == self._edge_cursor:
+            return
+        self._edge_cursor = shape
+        if shape is None:
+            self.unsetCursor()
+        else:
+            self.setCursor(shape)
 
     def _apply_style(self):
         # Fusion uses Qt's cross-platform controls and lets DWM composite one
