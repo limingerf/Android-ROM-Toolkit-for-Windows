@@ -5,6 +5,7 @@ import contextlib
 import json
 import os
 import shutil
+import stat
 import struct
 import sys
 import tempfile
@@ -147,17 +148,36 @@ def _publish(pairs, *, replace=False, workspace=None):
 
 
 def _tree_fingerprint(root):
-    """Fingerprint a workspace tree without depending on filename encoding."""
+    """Fingerprint a workspace tree without depending on filename encoding.
+
+    A boot ramdisk extracted by the bundled magiskboot contains symlinks that
+    Cygwin materializes as reparse points Windows cannot resolve.  ``stat()``
+    and ``open()`` on such an entry raise ``WinError 1920`` even though the
+    path belongs to the tree, which used to abort every init_boot/vendor_boot
+    extraction at the post-extraction fingerprint.  Record the name with an
+    "unreadable" marker instead of failing the job; the marker is stable, so a
+    later repack still compares against the same baseline.
+    """
     digest = hashlib.sha256()
     root = Path(root)
-    for path in sorted((p for p in root.rglob("*") if p.is_file()), key=lambda p: p.relative_to(root).as_posix()):
+    for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
         relative = path.relative_to(root).as_posix().encode("utf-8", "surrogatepass")
-        stat = path.stat()
+        try:
+            status = path.stat()
+        except OSError:
+            digest.update(relative)
+            digest.update(b"\0unreadable")
+            continue
+        if not stat.S_ISREG(status.st_mode):
+            continue
         digest.update(relative)
-        digest.update(str(stat.st_size).encode())
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
+        digest.update(str(status.st_size).encode())
+        try:
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError:
+            digest.update(b"\0unreadable")
     return digest.hexdigest()
 
 

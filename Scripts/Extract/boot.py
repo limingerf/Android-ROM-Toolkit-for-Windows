@@ -1,7 +1,9 @@
 """Boot image unpacker for boot/vendor_boot images."""
 
+import json
 import os
 import shutil
+import stat
 from pathlib import Path
 
 from Scripts.Primary.Utils import V, call, rmdire
@@ -46,6 +48,111 @@ def _decompress_zstd(source, destination):
     return True
 
 
+CPIO_MAGICS = (b"070701", b"070702", b"070707")
+CPIO_HEADER_SIZE = 110
+CPIO_ALIGN = 4
+RAMDISK_METADATA_NAME = "ramdisk.meta.json"
+
+
+def _is_cpio_archive(path):
+    """True when *path* starts with a newc/odc cpio magic."""
+    try:
+        with open(path, 'rb') as stream:
+            return stream.read(len(CPIO_MAGICS[0])) in CPIO_MAGICS
+    except OSError:
+        return False
+
+
+def _cpio_padding(size):
+    """Padding bytes that align the next cpio record to four bytes."""
+    return (-size) % CPIO_ALIGN
+
+
+def _read_cpio_entries(path):
+    """Return ``{member: metadata}`` for a newc ramdisk, or ``None``.
+
+    NTFS cannot represent the permission bits or symlinks a cpio archive
+    declares.  The bundled Cygwin magiskboot turns a symlink into a reparse
+    point Python cannot open and leaves every file at 0666, so a ramdisk
+    unpacked on Windows loses ``/init``'s exec bit and the target of
+    ``system/bin/snapuserd`` even though the tree looks complete.  Capture
+    those values while the uncompressed archive is still available; the
+    repacker writes them back into the new archive.
+    """
+    try:
+        with open(path, 'rb') as stream:
+            entries = {}
+            while True:
+                header = stream.read(CPIO_HEADER_SIZE)
+                if len(header) < CPIO_HEADER_SIZE:
+                    return None
+                if header[:6] not in (b"070701", b"070702"):
+                    return None
+                values = []
+                for index in range(13):
+                    start = 6 + index * 8
+                    try:
+                        values.append(int(header[start:start + 8], 16))
+                    except ValueError:
+                        return None
+                mode = values[1]
+                uid = values[2]
+                gid = values[3]
+                filesize = values[6]
+                rdevmajor = values[9]
+                rdevminor = values[10]
+                namesize = values[11]
+                name = stream.read(namesize)
+                if len(name) < namesize:
+                    return None
+                stream.seek(_cpio_padding(CPIO_HEADER_SIZE + namesize), 1)
+                member = name.rstrip(b"\0").decode("utf-8", "surrogateescape")
+                if member == "TRAILER!!!":
+                    break
+                data = stream.read(filesize)
+                if len(data) < filesize:
+                    return None
+                stream.seek(_cpio_padding(filesize), 1)
+                member = _normalise_cpio_member(member)
+                if not member:
+                    continue
+                entries[member] = {
+                    "mode": mode,
+                    "uid": uid,
+                    "gid": gid,
+                    "rdev": [rdevmajor, rdevminor],
+                    "link": (
+                        data.decode("utf-8", "surrogateescape")
+                        if stat.S_ISLNK(mode) else None
+                    ),
+                }
+            return entries
+    except OSError:
+        return None
+
+
+def _normalise_cpio_member(name):
+    """Relative POSIX path used as the metadata key."""
+    name = name.replace("\\", "/")
+    while name.startswith("./"):
+        name = name[2:]
+    return "" if name == "." else name
+
+
+def _save_ramdisk_metadata(cpio, destination):
+    """Record the cpio metadata beside the extracted ramdisk tree."""
+    entries = _read_cpio_entries(cpio)
+    if entries is None:
+        return False
+    try:
+        with open(destination, "w", encoding="utf-8") as handle:
+            json.dump({"version": 1, "entries": entries}, handle,
+                      ensure_ascii=True, separators=(",", ":"))
+    except OSError:
+        return False
+    return True
+
+
 def _decompress_ramdisk(compressed, destination, comp):
     """Expand *compressed* into *destination* according to the detected format."""
     if comp == 'zstd':
@@ -81,6 +188,17 @@ def unpackboot(file, distance):
             if not _decompress_ramdisk(compressed_ramdisk, ramdisk, comp):
                 print("Decompress Ramdisk Fail...")
                 return False
+
+        # vendor_boot v4 allows a raw vendor ramdisk and some devices ship a
+        # filesystem image there instead of a cpio archive.  magiskboot still
+        # writes the payload as ramdisk.cpio, but there is no cpio tree to
+        # extract; keep the bytes untouched so a later repack can reuse them.
+        if not _is_cpio_archive(ramdisk):
+            print(f"Ramdisk is not a cpio archive ({get_file_type(str(ramdisk))}), kept as {ramdisk.name}")
+            return True
+
+        if not _save_ramdisk_metadata(ramdisk, work_dir / RAMDISK_METADATA_NAME):
+            print("Ramdisk metadata not recorded; repack will fall back to Windows permissions")
 
         ramdisk_dir = work_dir / 'ramdisk'
         ramdisk_dir.mkdir(exist_ok=True)
