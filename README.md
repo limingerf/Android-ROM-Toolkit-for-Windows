@@ -1,12 +1,12 @@
 # **Android ROM Toolkit for Windows**
 
-当前版本：**v1.2.10**
+当前版本：**v1.2.11**
 
-#### **v1.2.10 更新**
+#### **v1.2.11 更新**
 
-- Windows 原生解包支持保留 Android 文件系统中仅大小写不同的目录和文件名。
-- 改进重复解包、覆盖发布和回包失败时的暂存产物清理与恢复。
-- 回包失败时显示底层构建工具返回的错误信息。
+- 修复 init_boot、vendor_boot 等 boot 类镜像无法解包：workspace 指纹不再被 Cygwin 符号链接重解析点中断。
+- vendor_boot v4 的原始文件系统 ramdisk（例如 FAT 镜像）按原样保留，不再因 `bad cpio header` 解包失败。
+- 回包时恢复 ramdisk 的权限、符号链接和设备节点；解包目录新增 `ramdisk.meta.json` 元数据文件。
 
 #### **介绍**
 
