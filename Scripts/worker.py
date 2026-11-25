@@ -49,7 +49,7 @@ class _LogStream:
 
 def _bind(layout, sparse=False, root=None):
     from Scripts.Primary.Utils import V
-    from Scripts.Primary.Settings import _SETUP_DEFAULTS
+    from Scripts.Primary.Settings import _SETUP_DEFAULTS, normalize_setup_manifest
     from Scripts.Platform.runtime import detect_toolchain
     V.layout = layout
     V.project = layout.project_dir.name
@@ -64,9 +64,12 @@ def _bind(layout, sparse=False, root=None):
         # A truncated settings file (killed write, full disk) must not kill
         # every job: fall back to the defaults and say so.
         try:
-            V.SETUP_MANIFEST.update(json.loads(settings.read_text(encoding="utf-8")))
-        except (OSError, ValueError) as error:
-            print(f"设置文件无法解析，已使用默认设置：{settings} ({error})", flush=True)
+            loaded = json.loads(settings.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise ValueError("设置文件必须是 JSON 对象")
+            V.SETUP_MANIFEST.update(normalize_setup_manifest(loaded))
+        except (OSError, ValueError, TypeError) as error:
+            print(f"设置文件无效，已使用默认设置：{settings} ({error})", flush=True)
     V.SETUP_MANIFEST["REPACK_SPARSE_IMG"] = "1" if sparse else "0"
     V.toolchain = detect_toolchain(root)
 
@@ -664,25 +667,61 @@ def _repack_super(controller, layout, stage, params):
         raise ValueError("super 类型必须是 0、1 或 2")
     copied = []
     allowed = {layout.input_dir.resolve(), layout.out_dir.resolve()}
+    seen = set()
+
+    def slot_of(path):
+        stem = partition_name(path)
+        return stem[-2:] if stem.endswith(("_a", "_b")) else ""
+
     for value in sources:
         source = Path(value).resolve()
         if source.parent not in allowed or not source.is_file() or source.suffix.lower() != ".img":
             raise ValueError("super 输入必须是工程 INPUT 或 OUT 下的 IMG")
-        destination = stage.input_dir / source.name
-        shutil.copyfile(source, destination)
         # ``Path.stem`` leaves an extra suffix for ``system_a.sparse.img``
         # and ``system_a.raw.img``.  Use the canonical image-name parser so
         # sparse/raw variants are grouped into the same logical partition.
         logical_name = partition_name(source)
         if logical_name.endswith(("_a", "_b")):
             logical_name = logical_name[:-2]
-        copied.append((logical_name, str(destination)))
+        if logical_name in seen:
+            # A/B projects often list both slots; the builder derives the
+            # other slot from INPUT, so passing both defined <name>_a twice
+            # and made lpmake reject the metadata.
+            continue
+        seen.add(logical_name)
+        variants = [source]
+        if super_type == 1:
+            # Stage both slots (and sparse/raw spellings) even when the user
+            # only selected one of them; otherwise the B slot silently became
+            # a zero-sized partition.
+            for directory in (layout.input_dir, layout.out_dir):
+                for candidate in directory.glob(logical_name + "*.img"):
+                    if not candidate.is_file() or candidate in variants:
+                        continue
+                    try:
+                        stem = partition_name(candidate)
+                    except LayoutError:
+                        continue
+                    if stem in {logical_name, logical_name + "_a", logical_name + "_b"}:
+                        variants.append(candidate)
+        primary = next((path for path in variants if slot_of(path) == "_a"), None)
+        primary = primary or next((path for path in variants if not slot_of(path)), source)
+        for variant in variants:
+            destination = stage.input_dir / variant.name
+            if destination.exists():
+                continue
+            shutil.copyfile(variant, destination)
+        copied.append((logical_name, str(stage.input_dir / primary.name)))
     from Scripts.ReMake.super import repack_super
-    repack_super(copied, super_type, 1 if params.get("sparse", False) else 0)
-    artifacts = [p for p in stage.out_dir.iterdir() if p.is_file()]
-    if not artifacts:
-        raise RuntimeError("super 回包失败，未生成产物")
-    return {"outputs": _publish([(path, layout.out_dir / path.name) for path in artifacts], replace=True,
+    if not repack_super(copied, super_type, 1 if params.get("sparse", False) else 0):
+        raise RuntimeError("super.img 合成失败")
+    # Only the finished container is a publishable artifact.  A failed lpmake
+    # run used to leave its partial .super.img.build / super.img.raw behind,
+    # and every file in the staging OUT directory was published.
+    artifact = stage.out_dir / "super.img"
+    if not artifact.is_file():
+        raise RuntimeError("super 回包失败，未生成 super.img")
+    return {"outputs": _publish([(artifact, layout.out_dir / artifact.name)], replace=True,
                                 workspace=layout.workspace_dir),
             "format": "super", "super_type": super_type}
 

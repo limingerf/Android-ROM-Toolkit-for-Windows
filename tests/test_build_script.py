@@ -195,6 +195,23 @@ class RunPyInstallerTests(unittest.TestCase):
         self.assertEqual(captured['env'].get('PYTHONIOENCODING'), 'utf-8')
 
 
+    def test_inherited_console_encoding_is_overridden(self):
+        # An empty or GBK PYTHONIOENCODING in the parent made setdefault()
+        # keep it, so PyInstaller still wrote non-UTF-8 bytes.
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured.update(kwargs)
+            return build.subprocess.CompletedProcess(command, 0, '', None)
+
+        for inherited in ("", "gbk"):
+            with mock.patch.dict(os.environ, {"PYTHONIOENCODING": inherited}):
+                with mock.patch.object(build.subprocess, 'run', fake_run):
+                    build.run_pyinstaller()
+            self.assertEqual(captured['env'].get('PYTHONIOENCODING'), 'utf-8')
+            self.assertEqual(captured['env'].get('PYTHONUTF8'), '1')
+
+
 class BuildMainLogTests(unittest.TestCase):
     """The build log is written even when the console stream was not UTF-8."""
 

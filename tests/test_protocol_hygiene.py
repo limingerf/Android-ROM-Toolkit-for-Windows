@@ -73,5 +73,18 @@ class RangeSetTruthinessTests(unittest.TestCase):
         self.assertTrue(bool(RangeSet([0, 1])))
 
 
+class RangeSetEqualityTests(unittest.TestCase):
+    def test_equal_and_different_range_sets(self):
+        self.assertTrue(RangeSet("10-19 30-34") == RangeSet("10-19 30-34"))
+        self.assertFalse(RangeSet("10-19") == RangeSet("10-20"))
+        self.assertTrue(RangeSet("10-19") != RangeSet("10-20"))
+
+    def test_comparison_with_another_type_does_not_raise(self):
+        # __eq__ read other.data and raised AttributeError for any non-RangeSet.
+        self.assertFalse(RangeSet("10-19") == "10-19")
+        self.assertTrue(RangeSet("10-19") != "10-19")
+        self.assertFalse(RangeSet("10-19") == 7)
+
+
 if __name__ == "__main__":
     unittest.main()

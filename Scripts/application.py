@@ -12,7 +12,7 @@ from pathlib import Path
 
 from Scripts.Platform.runtime import bootstrap_windows_tools, detect_toolchain, process_options
 from Scripts.Primary.WorkSpace import ProjectLayout, classify_ota_parts
-from Scripts.Primary.Settings import _SETUP_DEFAULTS
+from Scripts.Primary.Settings import _SETUP_DEFAULTS, normalize_setup_manifest
 from Scripts.Primary.Utils import remove_tree
 
 
@@ -118,7 +118,7 @@ class ArtController:
         if project_dir.is_symlink() or not project_dir.is_dir():
             raise ValueError("工程目录不存在或不是目录")
         layout = ProjectLayout(project_dir)
-        if layout.state() not in {"new", "incomplete", "unsupported"}:
+        if layout.state() not in {"empty", "new", "incomplete", "unsupported"}:
             raise ValueError("工程目录状态无效，拒绝删除")
         preserved = []
         entries = tuple(project_dir.iterdir())
@@ -150,7 +150,9 @@ class ArtController:
             if path.is_file():
                 loaded = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
-                    values.update({str(k): str(v) for k, v in loaded.items()})
+                    # Hand-edited numeric/boolean values must be read as the
+                    # strings the validation and repack code compare against.
+                    values.update(normalize_setup_manifest(loaded))
         except (OSError, ValueError, TypeError):
             pass
         return values
@@ -163,7 +165,7 @@ class ArtController:
         unknown = sorted(set(updates) - set(_SETUP_DEFAULTS))
         if unknown:
             raise ValueError(f"不支持的设置项：{', '.join(unknown)}")
-        values.update({str(k): str(v) for k, v in updates.items()})
+        values.update(normalize_setup_manifest(updates))
         # Mirror Settings.validate_default_env_setup without terminating the
         # GUI process via sys.exit().
         for key in ("REPACK_EROFS_IMG", "REPACK_SPARSE_IMG", "REPACK_TO_RW", "RESIZE_IMG"):

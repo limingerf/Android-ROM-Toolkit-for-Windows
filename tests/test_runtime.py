@@ -145,6 +145,29 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(command[0], "wsl.exe")
             self.assertIn("/mnt/e/art/system.img", command)
 
+    def test_non_object_tool_config_falls_back_to_detection(self):
+        # A JSON array parses successfully but has no .get(); the old code
+        # raised AttributeError while Scripts.Primary was still importing.
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"ART_BACKEND": ""}):
+            root = Path(directory)
+            (root / "art-res").mkdir()
+            (root / "art-res" / "host-tools.local.json").write_text("[1, 2]", encoding="utf-8")
+            toolchain = detect_toolchain(root)
+        self.assertNotEqual(toolchain.mode, "wsl")
+
+    @unittest.skipUnless(os.name == "nt", "Windows-specific native bridge")
+    def test_non_string_tool_directory_is_ignored(self):
+        # Path(5) used to raise TypeError during startup; ignore the field.
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+                os.environ, {"ART_BACKEND": "native", "ART_WINDOWS_TOOLS": ""}):
+            root = Path(directory)
+            (root / "art-res").mkdir()
+            (root / "art-res" / "host-tools.local.json").write_text(
+                '{"windows_tools": 5}', encoding="utf-8")
+            toolchain = detect_toolchain(root)
+        self.assertEqual(toolchain.mode, "native")
+        self.assertEqual(toolchain.label, "Windows 原生")
+
     def test_saved_choice_overrides_inherited_backend(self):
         from Scripts.application import ArtController
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"ART_BACKEND": "wsl"}):

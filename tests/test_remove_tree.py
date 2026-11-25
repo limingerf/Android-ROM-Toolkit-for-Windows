@@ -49,6 +49,18 @@ class RemoveTreeTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             Utils.remove_tree(Path(self.root) / "absent")
 
+    @unittest.skipUnless(os.name == "nt", "DOS read-only attribute")
+    def test_read_only_files_are_removed(self):
+        # Extracted metadata often keeps the source read-only bit, and plain
+        # rmtree then refused to remove the tree.
+        target = Path(self.root) / "tree"
+        target.mkdir()
+        locked = target / "locked.bin"
+        locked.write_bytes(b"x")
+        os.chmod(locked, 0o444)
+        Utils.remove_tree(target)
+        self.assertFalse(target.exists())
+
     def test_rmdire_still_removes_a_deep_tree(self):
         deep = deep_path(self.root)
         Path(Utils.extended_path(deep)).mkdir(parents=True)
@@ -92,6 +104,19 @@ class PreparePartitionOutputTests(unittest.TestCase):
         destination.write_bytes(b"not a directory")
         with self.assertRaises(ext4.ImageExtractionError):
             ext4._prepare_partition_output("system", destination)
+
+    @unittest.skipUnless(os.name == "nt", "DOS read-only attribute")
+    def test_read_only_output_tree_is_replaced(self):
+        # Re-extracting a partition into a workspace whose files are read-only
+        # used to abort with PermissionError before any extraction started.
+        destination = Path(self.root) / "system"
+        (destination / "app").mkdir(parents=True)
+        locked = destination / "app" / "locked.bin"
+        locked.write_bytes(b"x")
+        os.chmod(locked, 0o444)
+        output_dir, _ = ext4._prepare_partition_output("system", destination)
+        self.assertTrue(output_dir.is_dir())
+        self.assertEqual(list(output_dir.iterdir()), [])
 
     def test_unsafe_partition_name_is_rejected(self):
         with self.assertRaises(ext4.ImageExtractionError):

@@ -246,12 +246,26 @@ def ceil(x):
 
 
 def remove_tree(path, ignore_errors=False):
-    """Remove a tree that may live beyond MAX_PATH.
+    """Remove a tree that may live beyond MAX_PATH or contain read-only files.
 
     ``shutil.rmtree`` resolves the path itself, so a deep extraction tree below
-    a long project root could not be removed on Windows at all.
+    a long project root could not be removed on Windows at all.  It also gives
+    up on Windows files that still carry the DOS read-only bit, which extracted
+    or copied metadata often does; retry those entries after clearing it.
     """
-    shutil.rmtree(extended_path(path), ignore_errors=ignore_errors)
+    def _retry_writable(function, target, error_info):
+        try:
+            os.chmod(target, 0o777 if os.path.isdir(target) else 0o666)
+            function(target)
+        except OSError:
+            # Keep the original failure visible instead of leaving a partially
+            # removed tree behind and reporting success.
+            if error_info and len(error_info) > 1 and error_info[1] is not None:
+                raise error_info[1] from None
+            raise
+
+    shutil.rmtree(extended_path(path), ignore_errors=ignore_errors,
+                  onerror=None if ignore_errors else _retry_writable)
 
 
 def rmdire(path):
