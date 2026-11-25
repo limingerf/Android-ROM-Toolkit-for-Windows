@@ -683,14 +683,22 @@ def detect_toolchain(root: str | os.PathLike[str], required=REQUIRED_TOOLS) -> T
     config = {}
     if config_path.is_file():
         try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
+            loaded = json.loads(config_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
             # This runs while Scripts.Primary is imported, so a truncated file
             # used to kill every entry point before any UI existed.  Report it
             # on stderr - stdout may be an MCP JSON-RPC channel.
             print(f"工具配置无法解析，已改用自动检测: {error}", file=sys.stderr)
+        else:
+            if isinstance(loaded, dict):
+                config = loaded
+            else:
+                # A JSON array or scalar parses but has no keys; the old
+                # config.get() call then raised AttributeError during import.
+                print("工具配置格式无效（需要 JSON 对象），已改用自动检测", file=sys.stderr)
     arch = _architecture()
     backend = os.environ.get("ART_BACKEND") or config.get("backend", "native")
+    backend = str(backend).strip().lower() if isinstance(backend, (str, int, float)) else "native"
     if os.name == "nt" and backend == "wsl":
         bundled = root / "art-res" / f"bin-{arch}"
         if not bundled.is_dir():
@@ -699,6 +707,9 @@ def detect_toolchain(root: str | os.PathLike[str], required=REQUIRED_TOOLS) -> T
     if os.name == "nt":
         bundled = root / "art-res" / f"bin-win-{arch}"
         configured = os.environ.get("ART_WINDOWS_TOOLS") or config.get("windows_tools", "")
+        # A hand-edited number/object in this field used to reach Path() and
+        # raise TypeError; ignore unusable values instead of failing startup.
+        configured = configured if isinstance(configured, (str, os.PathLike)) else ""
         directories = tuple(p for p in (Path(configured).expanduser() if configured else None, bundled,
                                       bundled / "e2fsprogs",
                                       root / "art-res" / "bin") if p is not None and p.is_dir())

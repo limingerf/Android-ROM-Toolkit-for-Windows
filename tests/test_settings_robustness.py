@@ -55,11 +55,62 @@ class SettingsRobustnessTests(unittest.TestCase):
             json.loads(self.path.read_text(encoding="utf-8"))["SUPER_SIZE"], "9126805504"
         )
 
+    def test_non_object_settings_fall_back_to_defaults(self):
+        # JSON that parses but is not an object used to reach .setdefault() and
+        # kill the CLI start with AttributeError.
+        self.path.write_text("[]", encoding="utf-8")
+        Settings.load_setup_json()
+        self.assertEqual(V.SETUP_MANIFEST["REPACK_EROFS_IMG"], "1")
+        self.assertIsInstance(json.loads(self.path.read_text(encoding="utf-8")), dict)
+
+    def test_numeric_and_boolean_values_are_normalised(self):
+        # Repack code compares "1"/"0" and calls .lower() on UTC, so raw JSON
+        # types must be converted at load time.
+        self.path.write_text(
+            json.dumps({
+                **Settings._SETUP_DEFAULTS,
+                "REPACK_BR_LEVEL": 3,
+                "UTC": 1234567890,
+                "REPACK_SPARSE_IMG": True,
+            }),
+            encoding="utf-8",
+        )
+        Settings.load_setup_json()
+        self.assertEqual(V.SETUP_MANIFEST["REPACK_BR_LEVEL"], "3")
+        self.assertEqual(V.SETUP_MANIFEST["UTC"], "1234567890")
+        self.assertEqual(V.SETUP_MANIFEST["REPACK_SPARSE_IMG"], "1")
+        self.assertIsInstance(V.SETUP_MANIFEST["UTC"], str)
+
     def test_writing_leaves_no_temporary_files(self):
         self.path.write_text(json.dumps(Settings._SETUP_DEFAULTS), encoding="utf-8")
         Settings.load_setup_json()
         leftovers = [p.name for p in self.path.parent.iterdir() if p.name != "settings.json"]
         self.assertEqual(leftovers, [])
+
+
+class WorkerSettingsTests(unittest.TestCase):
+    def test_worker_bind_ignores_non_object_settings(self):
+        from Scripts.Primary.WorkSpace import ProjectLayout
+        from Scripts.worker import _bind
+
+        saved = dict(vars(V))
+        self.addCleanup(self._restore_v, saved)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "art-res").mkdir()
+            (root / "art-res" / "settings.json").write_text("[1, 2]", encoding="utf-8")
+            layout = ProjectLayout(root / "DNA_bind").initialize()
+            _bind(layout, root=root)
+        self.assertEqual(V.SETUP_MANIFEST["REPACK_EROFS_IMG"], "1")
+        self.assertEqual(V.SETUP_MANIFEST["REPACK_SPARSE_IMG"], "0")
+
+    @staticmethod
+    def _restore_v(saved):
+        for key in list(vars(V)):
+            if key not in saved:
+                delattr(V, key)
+        for key, value in saved.items():
+            setattr(V, key, value)
 
 
 if __name__ == "__main__":

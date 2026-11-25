@@ -126,7 +126,10 @@ def run_pyinstaller() -> subprocess.CompletedProcess:
     ask for UTF-8 and replace whatever still does not decode.
     """
     build_env = os.environ.copy()
-    build_env.setdefault('PYTHONIOENCODING', 'utf-8')
+    # Force, not setdefault: an inherited empty or GBK value silently kept
+    # PyInstaller on the console code page and defeated the UTF-8 decode below.
+    build_env['PYTHONIOENCODING'] = 'utf-8'
+    build_env['PYTHONUTF8'] = '1'
     return subprocess.run(
         pyinstaller_command(),
         stdout=subprocess.PIPE,

@@ -29,9 +29,15 @@ class RangeSet(object):
             yield self.data[i:i + 2]
 
     def __eq__(self, other):
+        if not isinstance(other, RangeSet):
+            # Comparing against a non-RangeSet used to raise AttributeError
+            # from other.data instead of answering False / NotImplemented.
+            return NotImplemented
         return self.data == other.data
 
     def __ne__(self, other):
+        if not isinstance(other, RangeSet):
+            return NotImplemented
         return self.data != other.data
 
     def __bool__(self):

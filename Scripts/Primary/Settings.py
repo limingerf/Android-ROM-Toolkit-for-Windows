@@ -32,6 +32,32 @@ _SETUP_DEFAULTS = {
 }
 
 
+# Normalise hand-edited values once, so every consumer can compare strings.
+def normalize_setup_manifest(manifest):
+    """Return a flat settings mapping whose scalar values are strings.
+
+    ``art-res/settings.json`` is meant to be edited by hand and the CLI accepts
+    JSON numbers there (``"REPACK_BR_LEVEL": 3``), but the rest of the code
+    compares values with ``"1"``/``"0"`` and calls string methods such as
+    ``.lower()`` on them.  Leaving the raw JSON types in ``V.SETUP_MANIFEST``
+    made a numeric ``UTC`` crash every EROFS/EXT4 repack with
+    ``AttributeError: 'int' object has no attribute 'lower'``, and made numeric
+    switches silently behave as "off".  Convert scalar values at the single
+    boundary where the file is read instead of patching every call site.
+    """
+    normalized = {}
+    for key, value in manifest.items():
+        if isinstance(value, bool):
+            value = "1" if value else "0"
+        elif value is None:
+            value = ""
+        # The schema is flat; stringify anything unexpected as well so a
+        # nested value cannot reach hash-based validation as an unhashable
+        # object (the previous get_settings() code stringified every value).
+        normalized[str(key)] = str(value)
+    return normalized
+
+
 # Defaults and validation.
 def set_default_env_setup():
     """Merge defaults into existing manifest, preserving user values."""
@@ -88,11 +114,21 @@ def write_setup_json():
 def load_setup_json():
     try:
         with open(SETUP_JSON, "r", encoding="utf-8") as manifest_file:
-            V.SETUP_MANIFEST = json.load(manifest_file)
+            loaded = json.load(manifest_file)
     except (OSError, ValueError) as error:
         # A truncated settings file must not stop the program from starting.
         print(f"> 设置文件无法解析，已恢复默认设置: {error}")
+        loaded = None
+    if loaded is None:
         V.SETUP_MANIFEST = dict(_SETUP_DEFAULTS)
+    elif not isinstance(loaded, dict):
+        # A JSON array/string/number parsed successfully but has no key-value
+        # pairs; set_default_env_setup() then raised AttributeError and killed
+        # the entry point before any UI existed.
+        print(f"> 设置文件格式无效（需要 JSON 对象），已恢复默认设置: {SETUP_JSON}")
+        V.SETUP_MANIFEST = dict(_SETUP_DEFAULTS)
+    else:
+        V.SETUP_MANIFEST = normalize_setup_manifest(loaded)
     set_default_env_setup()
     validate_default_env_setup(V.SETUP_MANIFEST)
     write_setup_json()

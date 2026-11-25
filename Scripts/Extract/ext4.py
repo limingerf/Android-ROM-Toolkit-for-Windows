@@ -652,7 +652,7 @@ class Inode:
         for i, part in enumerate(relative_path):
             if not self.volume.ignore_flags and not current_inode.is_dir:
                 current_path = "/".join(relative_path[:i])
-                raise Ext4Error(f"{current_path!r:s} (Inode {inode_idx:d}) is not a directory."
+                raise Ext4Error(f"{current_path!r:s} (Inode {current_inode.inode_idx:d}) is not a directory."
                                 )
 
             file_name, inode_idx, file_type = next(
@@ -1445,6 +1445,26 @@ def _extended_path(path):
     return "\\\\?\\" + absolute
 
 
+def _remove_tree(path):
+    """Remove a re-extraction target, clearing Windows read-only attributes.
+
+    The previous output tree can contain files copied with ``shutil.copy2``
+    from a read-only source, and plain ``shutil.rmtree`` then fails with
+    ``PermissionError`` before extracting anything.  Retry each blocked entry
+    after removing the DOS read-only bit.
+    """
+    def _retry_writable(function, target, error_info):
+        try:
+            os.chmod(target, 0o777 if os.path.isdir(target) else 0o666)
+            function(target)
+        except OSError:
+            if error_info and len(error_info) > 1 and error_info[1] is not None:
+                raise error_info[1] from None
+            raise
+
+    shutil.rmtree(_extended_path(path), onerror=_retry_writable)
+
+
 def _prepare_partition_output(partition, destination):
     """Prepare the output and metadata directories without project imports."""
     _validate_partition(partition)
@@ -1457,7 +1477,7 @@ def _prepare_partition_output(partition, destination):
         # cannot be removed by a plain rmtree, so the removal was skipped and
         # the mkdir below failed with WinError 3 when re-extracting a partition
         # whose previous output tree was too long to address.
-        shutil.rmtree(target)
+        _remove_tree(output_dir)
     Path(target).mkdir(parents=True, exist_ok=False)
 
     config_dir = output_dir.parent / "config"
